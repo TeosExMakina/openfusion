@@ -65,6 +65,7 @@ and example copies to `~/Documents/OpenFusion`.
 
 ## Building for Linux (Bash)
 
+```bash
 cd openfusion
 python3.13 -m venv .venv
 source .venv/bin/activate
@@ -72,9 +73,11 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[test,app]"
 python -m pytest
 openfusion app
-
+```
 
 ## Building for Windows (PowerShell)
+
+```bash
 
 cd openfusion
 py -3.13 -m venv .venv
@@ -83,7 +86,7 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[test,app]"
 python -m pytest
 openfusion app
-
+```
 
 
 ## Quick start
