@@ -1,0 +1,30 @@
+# A tour of the primitives and naming rules, everything placed by anchors.
+from openfusion import *
+
+params(base_r=30 * mm, base_h=5 * mm)
+
+# A hexagonal base. v0 sits at angle 0 (+X); sides s0..s5 run counterclockwise.
+base = polygon(n=6, r=P.base_r, h=P.base_h)
+
+# A spring standing on the base center.
+spring = coil(R=6, turns=4, pitch=4, size=2)
+place(spring.anchor("axis"), onto=base.anchor("+Z"), mode="flush")
+
+# A sphere sitting on side s1's outward face, at its center.
+ball = sphere(r=4)
+place(ball.anchor("-Z"), onto=base.anchor("s1"))
+
+# A torus lying flat on the base, toward vertex v3 (angle 180).
+ring = torus(R=5, r=1.5)
+place(ring.anchor("center"), onto=base.anchor("+Z").offset(x=-0.6 * P.base_r, z=1.5), mode="flush")
+
+# A small bracket and its mirror image across the world YZ plane.
+# The mirror is named as if built from scratch: its +X face is the reflection of the original's +X.
+bracket = box(length=12, width=4, height=10, at=world.point(12, -20, 0))
+# Face anchors point outward, so flip it to grow the cutter into the part.
+notch = cylinder(r=2, h=4, at=bracket.anchor("-Y").flipped())
+cut(bracket, tools=[notch])
+twin = mirror(bracket, plane="YZ")
+
+# A cone guide that is a reference body: snappable, never printed or booleaned.
+guide = cone(r1=4, r2=0, h=12, at=base.anchor("v0+Z"), role="reference")

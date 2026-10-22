@@ -1,0 +1,507 @@
+<title>OpenFusion Viewer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a workbench. Fixed-width panel of the model's timeline, parameters and bodies
+   on the left; the viewport fills the rest, with a toolbar on it and a status line under it.
+   Stacks to viewport-over-panel on phones. */
+:root {
+  --bg: #e9ecef;          /* bench: cool light grey */
+  --panel: #f6f7f9;
+  --ink: #1b2026;
+  --ink-2: #56606b;
+  --rule: #d3d8de;
+  --view: #dde2e7;        /* viewport background */
+  --accent: #b5762a;      /* print-bed bronze: hover and selection */
+  --accent-ink: #ffffff;
+  --ok: #2f8a4c; --warn: #b7791f; --err: #c0392b; --skip: #8a94a0;
+  --ref: #3f7fbf;         /* reference bodies */
+  --x: #d0453a; --y: #3c9a4e; --z: #3a6fd0;
+  --grid-minor: #c9d0d7; --grid-major: #aab4be;
+  --body-a: #c7cdd4; --body-b: #b9c4cf; --body-c: #cfc6b8;
+  --edge: #2a3038;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --text: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #15191e; --panel: #1b2026; --ink: #e6e9ed; --ink-2: #98a2ad; --rule: #2c333b; --view: #20262d;
+  --accent: #d79a4e; --accent-ink: #15191e; --ok: #4fb36d; --warn: #d9a441; --err: #e0675a; --skip: #78828d;
+  --ref: #6aa4e0; --x: #e8675c; --y: #5cbf6f; --z: #6b98ec; --grid-minor: #2b323a; --grid-major: #3b444e;
+  --body-a: #8d97a2; --body-b: #7f8fa0; --body-c: #a39886; --edge: #0d1013; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #15191e; --panel: #1b2026; --ink: #e6e9ed; --ink-2: #98a2ad; --rule: #2c333b; --view: #20262d;
+  --accent: #d79a4e; --accent-ink: #15191e; --ok: #4fb36d; --warn: #d9a441; --err: #e0675a; --skip: #78828d;
+  --ref: #6aa4e0; --x: #e8675c; --y: #5cbf6f; --z: #6b98ec; --grid-minor: #2b323a; --grid-major: #3b444e;
+  --body-a: #8d97a2; --body-b: #7f8fa0; --body-c: #a39886; --edge: #0d1013; color-scheme: dark }
+
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--text); }
+.app { height: 100%; display: grid; grid-template-columns: 320px minmax(0, 1fr); }
+.panel { background: var(--panel); border-right: 1px solid var(--rule); overflow: auto; min-width: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: 16px; padding-block: 16px 24px;
+  display: flex; flex-direction: column; gap: 20px; }
+.brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.brand b { font: 600 18px/1 var(--display); letter-spacing: .02em; }
+.brand .file { font: 13px var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+.summary { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px; font: 500 12px var(--text);
+  border: 1px solid currentColor; white-space: nowrap; }
+.pill.ok { color: var(--ok); } .pill.warning { color: var(--warn); } .pill.error { color: var(--err); } .pill.skipped { color: var(--skip); }
+.banner { border-left: 3px solid var(--err); padding: 8px 10px; background: color-mix(in srgb, var(--err) 10%, transparent); font-size: 13px; }
+.banner code { font-family: var(--mono); }
+h2 { font: 600 12px var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); margin: 0 0 8px; }
+.tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.tl li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; column-gap: 8px; padding: 5px 6px; border-radius: 4px; align-items: baseline; }
+.tl li:hover, .tl li.hot { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; background: var(--ok); }
+.dot.warning { background: var(--warn); } .dot.error { background: var(--err); } .dot.skipped { background: transparent; border: 1.5px solid var(--skip); }
+.tl .nm { font: 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl .nm span { color: var(--ink-2); }
+.tl .ms { font: 12px var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; text-align: right; }
+.tl .msg { grid-column: 2 / 4; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
+.tl .msg.error { color: var(--err); } .tl .msg.warning { color: var(--warn); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+td { padding: 4px 0; border-bottom: 1px solid var(--rule); }
+td:first-child { font-family: var(--mono); padding-right: 8px; overflow-wrap: anywhere; }
+td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.param { width: 92px; font: 13px var(--mono); text-align: right; padding: 3px 6px; border: 1px solid var(--rule); border-radius: 4px;
+  background: var(--bg); color: var(--ink); }
+.param:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.param.changed { border-color: var(--accent); }
+.note { font-size: 12px; color: var(--ink-2); margin: 6px 0 0; }
+.note code { font-family: var(--mono); }
+.bodies td:first-child { display: flex; align-items: center; gap: 6px; }
+.role { font: 500 11px var(--text); padding: 0 6px; border-radius: 3px; border: 1px solid var(--rule); color: var(--ink-2); }
+.role.reference { color: var(--ref); border-color: var(--ref); } .role.removed { text-decoration: line-through; }
+button { font: 500 12px var(--text); color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 4px;
+  padding: 4px 9px; cursor: pointer; }
+button[aria-pressed="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+button:hover { border-color: var(--accent); }
+.eye { padding: 0 6px; font-size: 11px; }
+
+.stage { position: relative; min-width: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; background: var(--view); }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.toolbar { position: absolute; top: 12px; left: 12px; right: max(12px, env(safe-area-inset-right, 0px)); display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; }
+.toolbar .grp { display: flex; gap: 4px; pointer-events: auto; background: color-mix(in srgb, var(--panel) 86%, transparent);
+  padding: 4px; border-radius: 6px; border: 1px solid var(--rule); }
+.legend { position: absolute; right: max(12px, env(safe-area-inset-right, 0px)); bottom: 52px; font: 12px var(--mono); color: var(--ink-2);
+  display: flex; gap: 10px; pointer-events: none; }
+.legend i { font-style: normal; } .legend .lx { color: var(--x); } .legend .ly { color: var(--y); } .legend .lz { color: var(--z); }
+.status { border-top: 1px solid var(--rule); background: var(--panel); padding-block: 8px;
+  padding-left: 12px; padding-right: max(12px, env(safe-area-inset-right, 0px)); display: flex; gap: 12px; align-items: center; min-height: 38px; min-width: 0; }
+.status code { font: 13px var(--mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.status .hint { font-size: 12px; color: var(--ink-2); margin-left: auto; white-space: nowrap; }
+.tip { position: absolute; pointer-events: none; font: 12px var(--mono); background: var(--ink); color: var(--panel); padding: 3px 7px; border-radius: 4px;
+  white-space: nowrap; transform: translate(12px, -28px); }
+.toast { position: absolute; left: 50%; bottom: 56px; transform: translateX(-50%); background: var(--accent); color: var(--accent-ink);
+  font: 500 13px var(--text); padding: 6px 12px; border-radius: 4px; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--ink-2); font-size: 14px; }
+
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: 62vh auto; height: auto; }
+  .panel { border-right: 0; border-top: 1px solid var(--rule); order: 2; padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .stage { order: 1; height: 62vh; }
+  .status .hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="app">
+  <aside class="panel" aria-label="Model">
+    <div>
+      <div class="brand"><b>OpenFusion</b><span class="file" id="file"></span></div>
+      <div class="summary" id="summary"></div>
+    </div>
+    <div class="banner" id="scripterr" hidden></div>
+    <section><h2>Timeline</h2><ol class="tl" id="timeline"></ol></section>
+    <section><h2>Parameters <span id="punit">mm</span></h2><table id="params"></table>
+      <p class="note" id="pnote"></p></section>
+    <section><h2>Bodies</h2><table class="bodies" id="bodies"></table></section>
+  </aside>
+  <main class="stage">
+    <canvas id="view" aria-label="3D view of the model"></canvas>
+    <div class="toolbar">
+      <div class="grp" role="group" aria-label="Show">
+        <button id="t-anchors" aria-pressed="true">Anchors</button>
+        <button id="t-points" aria-pressed="true">Points</button>
+        <button id="t-edges" aria-pressed="true">Edges</button>
+        <button id="t-refs" aria-pressed="true">Reference</button>
+        <button id="t-ghosts" aria-pressed="false">Removed</button>
+      </div>
+      <div class="grp" role="group" aria-label="View">
+        <button data-view="iso">Iso</button><button data-view="top">Top</button>
+        <button data-view="front">Front</button><button data-view="right">Right</button><button data-view="fit">Fit</button>
+      </div>
+      <div class="grp" role="group" aria-label="Export" id="exports" hidden>
+        <button data-fmt="3mf">3MF</button><button data-fmt="stl">STL</button><button data-fmt="step">STEP</button>
+      </div>
+    </div>
+    <div class="legend"><i class="lx">X</i><i class="ly">Y</i><i class="lz">Z up</i><i id="gridlbl">grid 10 mm</i></div>
+    <div class="tip" id="tip" hidden></div>
+    <div class="toast" id="toast" hidden></div>
+    <div class="empty" id="empty" hidden>No solid bodies yet</div>
+    <div class="status"><code id="ref">Point at a face, edge, anchor or dot to see its name</code><span class="hint">Click to copy the reference</span></div>
+  </main>
+</div>
+
+<!--OF:SCRIPTS-->
+<script>
+/*OF:BOOT*/
+</script>
+<script>
+(function () {
+  "use strict";
+  const BOOT = window.OF_BOOT || { mode: "static", scene: null };
+  const $ = (id) => document.getElementById(id);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const col = (name) => new THREE.Color(css(name) || "#888");
+
+  // ------------------------------------------------------------------ three setup
+  const canvas = $("view");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  const scene3 = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100000);
+  camera.up.set(0, 0, 1);
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.enableDamping = true; controls.dampingFactor = 0.12; controls.screenSpacePanning = true;
+  scene3.add(new THREE.HemisphereLight(0xffffff, 0x8a8f96, 0.75));
+  const key = new THREE.DirectionalLight(0xffffff, 0.65); key.position.set(0.4, -0.6, 1); camera.add(key);
+  scene3.add(camera);
+  const root = new THREE.Group(); scene3.add(root);
+  let grid = null;
+
+  const show = { anchors: true, points: true, edges: true, refs: true, ghosts: false };
+  const hiddenBodies = new Set();
+  let data = null, pickables = [], faceMeshes = [], hovered = null, pointGroup = new THREE.Group(), modelSize = 100;
+  scene3.add(pointGroup);
+
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    renderer.setSize(r.width, r.height, false);
+    camera.aspect = r.width / r.height; camera.updateProjectionMatrix();
+  }
+  new ResizeObserver(resize).observe(canvas);
+
+  function applyTheme() {
+    renderer.setClearColor(col("--view"));
+    if (data) build(data, true);
+  }
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+  new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  // ------------------------------------------------------------------ scene building
+  const bodyColors = ["--body-a", "--body-b", "--body-c"];
+
+  function makeGrid(box) {
+    if (grid) scene3.remove(grid);
+    const span = Math.max(box.max.x - box.min.x, box.max.y - box.min.y, 40);
+    const step = span > 400 ? 50 : span > 120 ? 10 : 5;
+    const major = step * 5;
+    const half = Math.ceil((span * 0.75 + major) / major) * major;
+    const cx = Math.round(((box.min.x + box.max.x) / 2) / major) * major, cy = Math.round(((box.min.y + box.max.y) / 2) / major) * major;
+    const minor = [], maj = [];
+    for (let v = -half; v <= half + 1e-6; v += step) {
+      const arr = (Math.abs(v % major) < 1e-6) ? maj : minor;
+      arr.push(cx - half, cy + v, 0, cx + half, cy + v, 0, cx + v, cy - half, 0, cx + v, cy + half, 0);
+    }
+    const g = new THREE.Group();
+    for (const [pts, c] of [[minor, "--grid-minor"], [maj, "--grid-major"]]) {
+      const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+      g.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: col(c) })));
+    }
+    g.renderOrder = -1;
+    grid = g; scene3.add(g);
+    $("gridlbl").textContent = `grid ${step} mm`;
+  }
+
+  function triad(fr, size, body, name) {
+    const g = new THREE.Group();
+    const o = new THREE.Vector3(...fr.o);
+    for (const [axis, c] of [["x", "--x"], ["y", "--y"], ["z", "--z"]]) {
+      const d = new THREE.Vector3(...fr[axis]).multiplyScalar(axis === "z" ? size * 1.3 : size);
+      const geo = new THREE.BufferGeometry().setFromPoints([o, o.clone().add(d)]);
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: col(c), depthTest: false }));
+      line.renderOrder = 10; g.add(line);
+    }
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(size * 0.16, 12, 8),
+      new THREE.MeshBasicMaterial({ color: col("--ink"), depthTest: false }));
+    knob.position.copy(o); knob.renderOrder = 11;
+    knob.userData = { kind: "anchor", body, ref: `${body}.anchor("${name}")`, knob: true };
+    g.add(knob); pickables.push(knob);
+    return g;
+  }
+
+  function build(d, keepCamera) {
+    data = d;
+    root.clear(); pickables = []; faceMeshes = []; pointGroup.clear(); hovered = null;
+    const box = new THREE.Box3();
+    const ink = col("--edge");
+    let colorIndex = 0, solids = 0;
+    for (const b of d.bodies) {
+      const isRef = b.role === "reference", isGone = b.role === "removed";
+      if (isGone && !show.ghosts) continue;
+      if (isRef && !show.refs) continue;
+      if (hiddenBodies.has(b.id)) continue;
+      const g = new THREE.Group(); g.userData.body = b.id;
+      const base = isRef ? col("--ref") : isGone ? col("--skip") : col(bodyColors[colorIndex++ % bodyColors.length]);
+      if (!isRef && !isGone) solids++;
+      for (const f of b.faces) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(f.p, 3));
+        geo.setAttribute("normal", new THREE.Float32BufferAttribute(f.n, 3));
+        geo.setIndex(f.i);
+        const mat = new THREE.MeshStandardMaterial({ color: base, roughness: 0.62, metalness: 0.04, side: THREE.DoubleSide,
+          transparent: isRef || isGone, opacity: isRef ? 0.28 : isGone ? 0.12 : 1, depthWrite: !(isRef || isGone),
+          polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+        const m = new THREE.Mesh(geo, mat);
+        m.userData = { kind: "face", body: b.id, label: f.label, face: f, ref: `${b.id}.face("${f.label}")`, ghost: isRef || isGone };
+        g.add(m); faceMeshes.push(m);
+        if (!isGone) pickables.push(m);
+        geo.computeBoundingBox(); box.union(geo.boundingBox);
+      }
+      if (show.edges && !isGone) {
+        for (const e of b.edges) {
+          if (e.label.startsWith("seam(")) continue;
+          const pts = [];
+          for (let i = 0; i + 3 < e.p.length; i += 3) pts.push(e.p[i], e.p[i + 1], e.p[i + 2], e.p[i + 3], e.p[i + 4], e.p[i + 5]);
+          if (!pts.length) continue;
+          const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+          const ln = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isRef ? col("--ref") : ink, transparent: true, opacity: isRef ? 0.6 : 0.85 }));
+          ln.userData = { kind: "edge", body: b.id, ref: `${b.id}.edge("${e.label}")` };
+          g.add(ln); pickables.push(ln);
+        }
+      }
+      root.add(g);
+    }
+    if (box.isEmpty()) box.set(new THREE.Vector3(-20, -20, 0), new THREE.Vector3(20, 20, 10));
+    const size = box.getSize(new THREE.Vector3());
+    modelSize = Math.max(size.x, size.y, size.z, 10);
+    if (show.anchors) {
+      const s = modelSize * 0.035;
+      for (const b of d.bodies) {
+        if ((b.role === "removed" && !show.ghosts) || (b.role === "reference" && !show.refs) || hiddenBodies.has(b.id)) continue;
+        for (const a of b.anchors) if (a.name !== "origin") root.add(triad(a, s, b.id, a.name));
+      }
+    }
+    makeGrid(box);
+    $("empty").hidden = solids > 0 || d.bodies.some(b => b.role === "reference");
+    if (!keepCamera) frame(box, "iso");
+    renderPanel(d);
+  }
+
+  function frame(box, view) {
+    if (!box) { box = new THREE.Box3(); root.traverse(o => { if (o.isMesh && o.userData.kind === "face") { o.geometry.computeBoundingBox(); box.union(o.geometry.boundingBox); } }); }
+    if (box.isEmpty()) return;
+    const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3()).length() || 50;
+    const dirs = { iso: [1, -1.25, 0.9], top: [0, -0.0001, 1], front: [0, -1, 0.0001], right: [1, 0, 0.0001] };
+    const dir = new THREE.Vector3(...(dirs[view] || dirs.iso)).normalize();
+    const vt = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)), ht = vt * camera.aspect;
+    const dist = s / (2 * Math.min(vt, ht)) * 1.05;
+    camera.position.copy(c).addScaledVector(dir, dist);
+    camera.near = dist / 200; camera.far = dist * 40; camera.updateProjectionMatrix();
+    controls.target.copy(c); controls.update();
+  }
+
+  // ------------------------------------------------------------------ face points on hover
+  function showPoints(mesh) {
+    pointGroup.clear();
+    if (!show.points || !mesh || mesh.userData.ghost) return;
+    const f = mesh.userData.face, pts = f.points;
+    if (!pts) return;
+    const r = modelSize * 0.008;
+    const mat = new THREE.MeshBasicMaterial({ color: col("--accent"), depthTest: false });
+    for (const kind of ["corner", "mid", "hole", "boss", "arc"]) {
+      const arr = pts[kind] || [];
+      arr.forEach((p, i) => {
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(kind === "hole" || kind === "boss" ? r * 1.4 : r, 10, 8), mat);
+        dot.position.set(p[0], p[1], p[2]); dot.renderOrder = 12;
+        dot.userData = { kind: "point", body: mesh.userData.body, ref: `${mesh.userData.ref}.${kind}(${i})`, owner: mesh };
+        pointGroup.add(dot);
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------ picking
+  const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  const tip = $("tip");
+  let downAt = null;
+
+  function pick(ev) {
+    const r = canvas.getBoundingClientRect();
+    mouse.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(mouse, camera);
+    const worldPerPx = camera.position.distanceTo(controls.target) * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 2 / r.height;
+    ray.params.Line.threshold = worldPerPx * 4;
+    // priority: anchors and face points (drawn on top), then the nearest of edge / face
+    const top = ray.intersectObjects([...pointGroup.children, ...pickables.filter(o => o.userData.knob)], false);
+    if (top.length) return top[0].object;
+    const hits = ray.intersectObjects(pickables.filter(o => !o.userData.knob && o.visible), false);
+    if (!hits.length) return null;
+    const first = hits[0];
+    const edge = hits.find(h => h.object.userData.kind === "edge" && h.distance < first.distance + worldPerPx * 6);
+    return edge ? edge.object : first.object;
+  }
+
+  function setHover(obj, ev) {
+    if (hovered && hovered !== obj) {
+      const h = hovered;
+      if (h.userData.kind === "face") h.material.emissive.setHex(0);
+      if (h.userData.kind === "edge") { h.material.color.copy(h.userData.baseColor || col("--edge")); }
+    }
+    const faceOwner = obj && obj.userData.kind === "point" ? obj.userData.owner : obj && obj.userData.kind === "face" ? obj : null;
+    if (obj && obj.userData.kind === "face" && obj !== hovered) showPoints(obj);
+    if (!obj) { pointGroup.clear(); }
+    hovered = obj;
+    if (obj) {
+      if (obj.userData.kind === "face") obj.material.emissive.copy(col("--accent")).multiplyScalar(0.35);
+      if (obj.userData.kind === "edge") { obj.userData.baseColor = obj.userData.baseColor || obj.material.color.clone(); obj.material.color.copy(col("--accent")); }
+      if (faceOwner && obj.userData.kind === "point") faceOwner.material.emissive.copy(col("--accent")).multiplyScalar(0.2);
+      $("ref").textContent = obj.userData.ref;
+      tip.textContent = obj.userData.ref; tip.hidden = false;
+      const r = canvas.getBoundingClientRect();
+      tip.style.left = (ev.clientX - r.left) + "px"; tip.style.top = (ev.clientY - r.top) + "px";
+      highlightTimeline(obj.userData.body);
+    } else {
+      tip.hidden = true; highlightTimeline(null);
+    }
+  }
+
+  canvas.addEventListener("pointermove", (ev) => setHover(pick(ev), ev));
+  canvas.addEventListener("pointerleave", () => { setHover(null); });
+  canvas.addEventListener("pointerdown", (ev) => { downAt = [ev.clientX, ev.clientY]; });
+  canvas.addEventListener("pointerup", (ev) => {
+    if (!downAt || Math.hypot(ev.clientX - downAt[0], ev.clientY - downAt[1]) > 4) return;
+    const obj = pick(ev);
+    if (ev.pointerType !== "mouse") setHover(obj, ev);
+    if (obj) copy(obj.userData.ref);
+  });
+
+  let toastTimer = null;
+  function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 1400); }
+  function copy(text) {
+    try {
+      navigator.clipboard.writeText(text).then(() => toast("Copied " + text), () => selectRef());
+    } catch (e) { selectRef(); }
+  }
+  function selectRef() {
+    const range = document.createRange(); range.selectNodeContents($("ref"));
+    const s = window.getSelection(); s.removeAllRanges(); s.addRange(range); toast("Selected: press Cmd+C to copy");
+  }
+
+  // ------------------------------------------------------------------ panel
+  function fmt(v) { return (typeof v === "number") ? (Math.round(v * 1000) / 1000).toString() : String(v); }
+
+  function renderPanel(d) {
+    $("file").textContent = d.file ? d.file.split(/[\\/]/).pop() : "";
+    const counts = {};
+    d.timeline.forEach(r => counts[r.status] = (counts[r.status] || 0) + 1);
+    const worst = counts.error ? "error" : counts.skipped ? "skipped" : counts.warning ? "warning" : "ok";
+    const word = { ok: "Built", warning: "Built with warnings", error: "Errors", skipped: "Errors" }[worst];
+    $("summary").innerHTML = "";
+    const p = document.createElement("span"); p.className = "pill " + worst; p.textContent = word; $("summary").append(p);
+    const s = document.createElement("span"); s.textContent = d.summary.replace(/^\d+ features, /, d.timeline.length + " features, "); $("summary").append(s);
+    const se = $("scripterr");
+    se.hidden = !d.script_error;
+    if (d.script_error) se.innerHTML = `Script stopped at line ${d.script_error_line ?? "?"}: <code></code>`, se.querySelector("code").textContent = d.script_error;
+
+    const tl = $("timeline"); tl.innerHTML = "";
+    for (const r of d.timeline) {
+      const li = document.createElement("li"); li.dataset.name = r.name;
+      li.innerHTML = `<i class="dot ${r.status}" title="${r.status}"></i><span class="nm"></span><span class="ms"></span>`;
+      li.querySelector(".nm").innerHTML = `${esc(r.name)} <span>${esc(r.op)}</span>`;
+      if (r.line) li.title = `${r.name}: ${r.op}, line ${r.line}`;
+      li.querySelector(".ms").textContent = r.cached ? "cached" : `${r.ms.toFixed(1)} ms`;
+      const msgs = (r.message ? [[r.status, r.message]] : []).concat(r.warnings.map(w => ["warning", w]));
+      for (const [k, m] of msgs) { const e = document.createElement("div"); e.className = "msg " + k; e.textContent = m; li.append(e); }
+      li.addEventListener("mouseenter", () => highlightBodies(r.name));
+      li.addEventListener("mouseleave", () => highlightBodies(null));
+      tl.append(li);
+    }
+
+    const pt = $("params"); pt.innerHTML = "";
+    const live = BOOT.mode === "live";
+    for (const [k, v] of Object.entries(d.params)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${esc(k)}</td><td></td>`;
+      if (live && typeof v === "number") {
+        const inp = document.createElement("input"); inp.type = "number"; inp.step = "any"; inp.className = "param"; inp.id = "p-" + k;
+        inp.value = fmt(v); if (overrides[k] !== undefined) inp.classList.add("changed");
+        inp.addEventListener("change", () => setParam(k, inp.value));
+        tr.lastChild.append(inp);
+      } else tr.lastChild.textContent = fmt(v);
+      pt.append(tr);
+    }
+    $("pnote").innerHTML = live
+      ? (Object.keys(overrides).length ? `Trying values without editing the script. <button id="reset">Reset to script</button>` : "Edit a value to rebuild. The script file is not changed.")
+      : "Values from the script. Run <code>openfusion watch part.ofs</code> to edit them live.";
+    const rb = $("reset"); if (rb) rb.addEventListener("click", () => setParam(null, null));
+
+    const bt = $("bodies"); bt.innerHTML = "";
+    for (const b of d.bodies) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td><button class="eye" aria-pressed="${!hiddenBodies.has(b.id)}" title="Show or hide">${hiddenBodies.has(b.id) ? "off" : "on"}</button>${esc(b.id)} <span class="role ${b.role}">${b.role}${b.mirrored ? " · mirrored" : ""}</span></td>
+        <td>${(b.volume / 1000).toFixed(2)} cm³</td>`;
+      tr.querySelector(".eye").addEventListener("click", () => { hiddenBodies.has(b.id) ? hiddenBodies.delete(b.id) : hiddenBodies.add(b.id); build(data, true); });
+      tr.addEventListener("mouseenter", () => highlightBody(b.id));
+      tr.addEventListener("mouseleave", () => highlightBody(null));
+      bt.append(tr);
+    }
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+  function highlightBody(id) {
+    for (const m of faceMeshes) m.material.emissive.copy(m.userData.body === id ? col("--accent") : new THREE.Color(0)).multiplyScalar(0.25);
+  }
+  function highlightBodies(feature) {
+    if (!data) return;
+    const ids = feature ? new Set(data.bodies.filter(b => b.history.includes(feature)).map(b => b.id)) : new Set();
+    for (const m of faceMeshes) m.material.emissive.copy(ids.has(m.userData.body) ? col("--accent") : new THREE.Color(0)).multiplyScalar(0.25);
+  }
+  function highlightTimeline(bodyId) {
+    const b = data && bodyId ? data.bodies.find(x => x.id === bodyId) : null;
+    const hist = new Set(b ? b.history : []);
+    for (const li of $("timeline").children) li.classList.toggle("hot", hist.has(li.dataset.name));
+  }
+
+  // ------------------------------------------------------------------ toolbar
+  for (const k of Object.keys(show)) {
+    const b = $("t-" + k); if (!b) continue;
+    b.setAttribute("aria-pressed", String(show[k]));
+    b.addEventListener("click", () => { show[k] = !show[k]; b.setAttribute("aria-pressed", String(show[k])); build(data, true); });
+  }
+  document.querySelectorAll("[data-view]").forEach(b => b.addEventListener("click", () => frame(null, b.dataset.view === "fit" ? "iso" : b.dataset.view)));
+
+  // ------------------------------------------------------------------ live mode
+  let overrides = {}, version = -1;
+  async function setParam(k, v) {
+    if (k === null) overrides = {}; else overrides[k] = parseFloat(v);
+    await fetch("api/params", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(overrides) });
+    poll(true);
+  }
+  async function poll(force) {
+    try {
+      const v = await (await fetch("api/version", { cache: "no-store" })).json();
+      if (force || v.version !== version) {
+        const first = version < 0; version = v.version;
+        const d = await (await fetch("api/scene", { cache: "no-store" })).json();
+        build(d, !first);
+      }
+    } catch (e) { $("summary").textContent = "Lost connection to openfusion watch"; }
+  }
+  if (BOOT.mode === "live") {
+    $("exports").hidden = false;
+    document.querySelectorAll("[data-fmt]").forEach(b => b.addEventListener("click", () => { window.location.href = "api/export?fmt=" + b.dataset.fmt; }));
+    poll(); setInterval(poll, 500);
+  }
+
+  // ------------------------------------------------------------------ go
+  resize(); renderer.setClearColor(col("--view"));
+  if (BOOT.scene) build(BOOT.scene, false);
+  (function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene3, camera); })();
+})();
+</script>

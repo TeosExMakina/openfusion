@@ -1,0 +1,54 @@
+# Parametric project box with screw bosses and a matching lid, laid out for printing.
+# Everything is placed by anchors, so any parameter can change and the bosses,
+# screw holes and lid stay where they belong.
+from openfusion import *
+
+params(
+    inner_l    = 60 * mm,
+    inner_w    = 40 * mm,
+    inner_h    = 25 * mm,
+    wall       = 2 * mm,
+    floor      = 2 * mm,
+    corner_r   = 3 * mm,
+    boss_r     = 3.5 * mm,
+    boss_inset = 4.5 * mm,     # boss center distance from the cavity walls
+    screw_r    = 1.25 * mm,    # pilot hole for an M3 self-tapping screw
+    clear_r    = 1.7 * mm,     # clearance hole in the lid
+    lid_gap    = 10 * mm,      # spacing between box and lid on the print bed
+)
+
+# --- box ------------------------------------------------------------------
+case = box(length=P.inner_l + 2 * P.wall, width=P.inner_w + 2 * P.wall,
+           height=P.inner_h + P.floor, origin="center_xy")
+round_corners = fillet(case, edges=["+X+Y", "+X-Y", "-X+Y", "-X-Y"], r=P.corner_r)
+
+cavity = box(length=P.inner_l, width=P.inner_w, height=P.inner_h, origin="center_xy")
+place(cavity.anchor("+Z"), onto=case.anchor("+Z"), mode="flush")   # open at the top
+hollow = cut(case, tools=[cavity])
+
+# One boss standing on the cavity floor in a corner, then patterned to all four.
+# The cavity was consumed by the cut, but its design anchors are still usable.
+boss = cylinder(r=P.boss_r, h=P.inner_h)
+place(boss.anchor("-Z"),
+      onto=cavity.anchor("-Z").offset(x=P.inner_l / 2 - P.boss_inset, y=P.inner_w / 2 - P.boss_inset),
+      mode="flush")
+bosses = pattern_rect(boss, x=(2, -(P.inner_l - 2 * P.boss_inset)), y=(2, P.inner_w - 2 * P.boss_inset))
+add_bosses = join(case, tools=[bosses])
+
+pilot = cylinder(r=P.screw_r, h=P.inner_h * 0.8)
+place(pilot.anchor("+Z"), onto=boss.anchor("+Z"), mode="flush")
+pilots = pattern_rect(pilot, x=(2, -(P.inner_l - 2 * P.boss_inset)), y=(2, P.inner_w - 2 * P.boss_inset))
+drill = cut(case, tools=[pilots])
+
+# --- lid ------------------------------------------------------------------
+lid = box(length=P.inner_l + 2 * P.wall, width=P.inner_w + 2 * P.wall, height=P.wall, origin="center_xy")
+place(lid.anchor("-Z"), onto=world.bed.offset(y=P.inner_w + 2 * P.wall + P.lid_gap))
+lid_corners = fillet(lid, edges=["+X+Y", "+X-Y", "-X+Y", "-X-Y"], r=P.corner_r)
+
+hole = cylinder(r=P.clear_r, h=P.wall)
+place(hole.anchor("+Z"),
+      onto=lid.anchor("+Z").offset(x=P.inner_l / 2 - P.boss_inset, y=-(P.inner_w / 2 - P.boss_inset)),
+      mode="flush")
+holes = pattern_rect(hole, x=(2, -(P.inner_l - 2 * P.boss_inset)), y=(2, P.inner_w - 2 * P.boss_inset))
+lid_holes = cut(lid, tools=[holes])
+lid_edge = chamfer(lid, edges=lid.edges("+Z", kind="outer"), d=0.6 * mm)

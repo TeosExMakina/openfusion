@@ -1,0 +1,32 @@
+# Plate with a post standing on its center and four through-holes.
+# Change any parameter and rebuild: the post stays centered, the holes stay
+# inside the plate, and the fillets follow.
+from openfusion import *
+
+params(
+    plate_l = 80 * mm,
+    plate_w = 40 * mm,
+    plate_t = 6 * mm,
+    post_r  = 8 * mm,
+    post_h  = 30 * mm,
+    hole_r  = 2.5 * mm,
+    margin  = 8 * mm,
+)
+
+plate = box(length=P.plate_l, width=P.plate_w, height=P.plate_t, origin="center_xy")
+post  = cylinder(r=P.post_r, h=P.post_h)
+place1 = place(post.anchor("-Z"), onto=plate.anchor("+Z"))      # mate: post sits on the plate
+join1  = join(plate, tools=[post])                               # plate absorbs post
+
+# one hole tool, flush with the plate's top, in the +X+Y corner region
+pin    = cylinder(r=P.hole_r, h=P.plate_t)
+place2 = place(pin.anchor("+Z"),
+               onto=plate.anchor("+Z").offset(x=P.plate_l / 2 - P.margin,
+                                               y=P.plate_w / 2 - P.margin),
+               mode="flush")
+pins   = pattern_rect(pin, x=(2, -(P.plate_l - 2 * P.margin)),
+                           y=(2, -(P.plate_w - 2 * P.margin)))
+cut1   = cut(plate, tools=[pins])
+
+fil1   = fillet(plate, edges=[edge_between(post.face("side"), plate.face("+Z"))], r=2 * mm)
+fil2   = fillet(plate, edges=plate.edges("+Z", kind="outer"), r=1 * mm)

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openfusion"
+version = "0.8.1"
+description = "Parametric, anchor-based solid modeling for 3D printing, on OpenCASCADE."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cadquery-ocp>=7.8",   # OpenCASCADE bindings; native wheels for Apple Silicon
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-cov>=4"]
+app = ["pywebview==6.2.1"]       # the desktop window (macOS: WKWebView through pyobjc)
+
+[project.scripts]
+openfusion = "openfusion.cli:main"
+openfusion-app = "openfusion.app:main"
+
+[tool.setuptools]
+packages = ["openfusion", "openfusion.viewer", "openfusion.gui"]
+
+[tool.setuptools.package-data]
+"openfusion.viewer" = ["viewer.html", "vendor/*"]
+"openfusion.gui" = ["static/*"]
+"openfusion" = ["fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]   # tests find the package even before `pip install -e .`
