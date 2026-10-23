@@ -1,5 +1,9 @@
 # OpenFusion
 
+
+
+![Screenshot 2026-10-23 at 3.59.17 AM.jpg](../../../../Desktop/Screenshot%202026-10-23%20at%203.59.17%E2%80%AFAM.jpg)
+
 Parametric solid modeling for 3D printing where every face, edge and anchor has a
 stable name, so changing a parameter and rebuilding never quietly breaks your part.
 
