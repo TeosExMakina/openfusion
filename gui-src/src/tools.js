@@ -104,7 +104,7 @@ export const TOOLS = {
     fields: [{ key: "sections", label: "Sections", kind: "faces", required: true, ordered: true },
       { key: "ruled", label: "Sides", kind: "choice", options: [["False", "Smooth"], ["True", "Straight (ruled)"]], def: "False", raw: ["True", "False"] }, OP_NEW, TARGET] },
   sweep: { label: "Sweep", key: "W", op: "sweep",
-    help: "Click the cross-section, then the path: a sketch (its open curves), curves of a sketch one by one, an open profile, or edges of a body that join end to end. Draw the section across the start of the path.",
+    help: "Click the cross-section, then the path: a sketch (its open curves), curves of a sketch one by one, an open profile, a closed loop (a circle, a rectangle...), or edges of a body that join end to end. Draw the section across the path: at either end of an open path, anywhere on a closed one.",
     fields: [PROFILE, { key: "path", label: "Path", kind: "path", required: true },
       { key: "twist", label: "Twist", kind: "choice", options: [["follow", "Follow the path"], ["frenet", "Frenet (helices)"]], def: "follow" }, OP_NEW, TARGET] },
   shell: { label: "Shell", key: "O", op: "shell",

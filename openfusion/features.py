@@ -177,12 +177,87 @@ def _chain(edges, near=None, normal=None):
                     segs = rev
         elif np.linalg.norm(tail() - near) < np.linalg.norm(head() - near):
             segs = [(i, not back) for i, back in reversed(segs)]
+    chain = [topo._edge(edges[i].Reversed()) if back else edges[i] for i, back in segs]
+    if closed and near is not None and normal is not None:
+        chain = _start_loop_at_section(chain, np.asarray(near, float), np.asarray(normal, float))
     mk = BRepBuilderAPI_MakeWire()
-    for i, back in segs:
-        mk.Add(topo._edge(edges[i].Reversed()) if back else edges[i])
+    for e in chain:
+        mk.Add(e)
     if not mk.IsDone():
         raise ValueError("could not join the path edges into one wire")
     return mk.Wire()
+
+
+def _start_loop_at_section(chain, c, n):
+    """A closed path starts where the cross-section is, not at one of its corners: the loop is
+    cut where it passes through the section's plane (nearest the section's centre; else at its
+    point nearest the centre), so a circle drawn anywhere on a ring of curves sweeps from there."""
+    from OCP.BRep import BRep_Tool
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
+    from OCP.TopAbs import TopAbs_REVERSED
+    segs = []                                   # (curve, start param, end param) in walking order
+    for e in chain:
+        crv = BRep_Tool.Curve_s(e, 0.0, 0.0)          # (located: in world coordinates)
+        a, b = BRep_Tool.Range_s(e)
+        if crv is None:
+            return chain
+        segs.append((crv, b, a) if e.Orientation() == TopAbs_REVERSED else (crv, a, b))
+
+    def pt(crv, t):
+        q = crv.Value(t)
+        return np.array([q.X(), q.Y(), q.Z()])
+    size = max(float(np.linalg.norm(pt(cv, t0) - c)) for cv, t0, _ in segs) or 1.0
+    best = None                                 # (score, seg index, param)
+    for k, (crv, t0, t1) in enumerate(segs):
+        ts = np.linspace(t0, t1, 97)
+        f = [float(np.dot(pt(crv, t) - c, n)) for t in ts]
+        for j in range(96):
+            if f[j] == 0:
+                cands = [ts[j]]
+            elif f[j] * f[j + 1] < 0:
+                lo, hi, flo = ts[j], ts[j + 1], f[j]
+                for _ in range(60):
+                    mid = (lo + hi) / 2
+                    fm = float(np.dot(pt(crv, mid) - c, n))
+                    if (fm < 0) == (flo < 0) and fm != 0:
+                        lo, flo = mid, fm
+                    else:
+                        hi = mid
+                cands = [(lo + hi) / 2]
+            else:
+                continue
+            for t in cands:
+                d = float(np.linalg.norm(pt(crv, t) - c))
+                if best is None or d < best[0]:
+                    best = (d, k, t)
+    if best is None or best[0] > size:          # the plane misses the loop: its nearest point
+        for k, (crv, t0, t1) in enumerate(segs):
+            for t in np.linspace(t0, t1, 201):
+                d = float(np.linalg.norm(pt(crv, t) - c))
+                if best is None or d < best[0]:
+                    best = (d, k, t)
+    _, k, t = best
+    crv, t0, t1 = segs[k]
+
+    def piece(s0, s1):
+        if abs(s1 - s0) < 1e-9:
+            return None
+        e = BRepBuilderAPI_MakeEdge(crv, min(s0, s1), max(s0, s1)).Edge()
+        return topo._edge(e.Reversed()) if s1 < s0 else e
+    span = abs(t1 - t0) or 1.0
+    if abs(t - t0) < 1e-6 * span:               # already a corner: just start there
+        return chain[k:] + chain[:k]
+    if abs(t - t1) < 1e-6 * span:
+        return chain[k + 1:] + chain[:k + 1]
+    if len(segs) == 1 and crv.DynamicType().Name() == "Geom_Circle":
+        # a whole circle: the same circle turned about its axis so that it starts at t (one side
+        # face per section edge, not two); other closed curves are cut in two pieces below
+        turned = crv.Copy()
+        turned.Rotate(crv.Axis(), t - min(t0, t1))
+        e = BRepBuilderAPI_MakeEdge(turned, min(t0, t1), max(t0, t1)).Edge()
+        return [topo._edge(e.Reversed()) if t1 < t0 else e]
+    first, last = piece(t, t1), piece(t0, t)
+    return [first] + chain[k + 1:] + chain[:k] + [last]
 
 
 def _start_tangent(wire):
@@ -580,8 +655,9 @@ def _sweep(ctx, profile, path, op="new", target=None, twist="follow"):
     """Move a cross-section along a path. profile: a profile or a flat face.
     path: an open or closed profile (a polyline drawn with profile(points=..., closed=False)),
     or edges of solids that join end to end, e.g. [plate.edge("+X+Z"), plate.edge("+Y+Z")].
-    The cross-section is swept from where it is: draw it at the start of the path
-    (profile(..., at=path.anchor("start")) puts it there, square to the path).
+    The cross-section is swept from where it is: draw it across one end of an open path
+    (profile(..., at=path.anchor("start")) puts it there, square to the path), or anywhere
+    across a closed one (a circle, a rectangle): the loop starts where the section cuts it.
     twist: 'follow' (default, the section turns with the path) or 'frenet' (for helices).
     Faces: 'start', 'end' (open paths), 'side' pieces."""
     from OCP.BRepOffsetAPI import BRepOffsetAPI_MakePipeShell

@@ -118,6 +118,39 @@ def test_sweep_along_solid_edges_and_loops():
     assert 12000 - vol(r, "b") == pytest.approx(math.pi / 4 * 140, rel=0.03)
 
 
+def test_sweep_round_a_closed_loop_starts_where_the_section_is():
+    """A section drawn anywhere across a circle, an ellipse or a rectangle (not only at the loop's
+    seam or a corner) sweeps a whole ring: the loop is started where the section cuts it."""
+    ring = ('c = sketch(points={"o": (0, 0)}, curves={"c1": ("circle", "o", 20)})\n'
+            's = sketch(at=world.anchor("YZ"), points={"a": (20, 0), "b": (22.5, 1.5), "d": (18, 4), "e": (16, 0.5),'
+            ' "f": (15, -6.5), "g": (24, -3)}, curves={"l1": ("line", "a", "b"), "l2": ("line", "b", "d"),'
+            ' "l3": ("line", "d", "e"), "l4": ("line", "e", "f"), "l5": ("line", "f", "g"), "l6": ("line", "g", "a")})\n')
+    P = np.array([(20, 0), (22.5, 1.5), (18, 4), (16, 0.5), (15, -6.5), (24, -3)])
+    x, y = P[:, 0], P[:, 1]
+    cr = x * np.roll(y, -1) - np.roll(x, -1) * y
+    pappus = abs(cr.sum() / 2) * 2 * math.pi * abs(np.sum((x + np.roll(x, -1)) * cr) / (3 * cr.sum()))
+    for path in ('[c.edge("c1")]', "c"):
+        r = ok(ring + f"body1 = sweep(profile=s, path={path})")
+        assert vol(r, "body1") == pytest.approx(pappus, rel=1e-9)
+        assert topo.is_valid(r.bodies["body1"].shape) and len(r.bodies["body1"].face_labels()) == 6
+    a, b = 30, 15
+    h = ((a - b) / (a + b)) ** 2
+    tube = math.pi * 4 * math.pi * (a + b) * (1 + 3 * h / (10 + math.sqrt(4 - 3 * h)))
+    el = 'el = sketch(points={"o": (0, 0)}, curves={"e": ("ellipse", "o", 30, 15)})\n'
+    for plane, pt in (("YZ", "(15, 0)"), ("XZ", "(30, 0)"), ("YZ", "(-15, 0)")):
+        r = ok(el + f'sec = sketch(at=world.anchor("{plane}"), points={{"o": {pt}}}, curves={{"c": ("circle", "o", 2)}})\n'
+                    'ring = sweep(profile=sec, path=el)')
+        assert vol(r, "ring") == pytest.approx(tube, rel=1e-5), (plane, pt)
+    rect = ('r = sketch(points={"a": (-30, -20), "b": (30, -20), "c": (30, 20), "d": (-30, 20)}, curves={"l1": ("line", "a", "b"),'
+            ' "l2": ("line", "b", "c"), "l3": ("line", "c", "d"), "l4": ("line", "d", "a")})\n')
+    for off in (0, 10, -27):
+        r = build(rect + f'sec = sketch(at=world.anchor("YZ").offset(z={off}), points={{"o": (-20, 0)}}, curves={{"c": ("circle", "o", 2)}})\n'
+                         'frame = sweep(profile=sec, path=r)')
+        res = r.results[-1]
+        assert res.status == "ok" and not res.warnings, r.report()
+        assert vol(r, "frame") == pytest.approx(math.pi * 4 * 200, rel=1e-6)
+
+
 def test_sweep_section_along_the_path_is_explained():
     msg = err('b = box(length=40, width=30, height=10)\nrail = sweep(profile(r=1, at=world.point(0, 0, 10)), [b.edge("-Y+Z")])', "rail")
     assert "across the path" in msg
