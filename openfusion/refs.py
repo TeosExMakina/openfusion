@@ -495,9 +495,9 @@ class EdgeRef(Ref):
     def resolve(self, ctx):
         from .body import split_edge_name
         body = ctx.body(self.handle, allow_removed=True)
-        for n, e, _ in body.curves():           # a sketch's curve, by name
-            if n == self.name:
-                return body, [e]
+        mine = [e for n, e, _ in body.curves() if n == self.name]     # a sketch's curve, by name
+        if mine:
+            return body, mine                   # (a gear's outline is many edges)
         if body.curves():
             raise RefError(f"{self!r}: the sketch has no curve {self.name!r} "
                            f"(it has {', '.join(n for n, _, _ in body.curves())})")

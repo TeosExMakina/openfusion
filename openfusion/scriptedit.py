@@ -30,11 +30,11 @@ OPS = {
     "place", "place_on_bed", "move", "rotate", "copy", "pattern_rect", "pattern_circ", "mirror", "scale",
     "combine", "join", "cut", "intersect", "fillet", "chamfer", "extrude", "split",
     "set_anchor", "set_role", "remove",
-    "profile", "revolve", "loft", "sweep", "shell", "draft", "sketch", "hole", "thread", "text", "plane", "axis", "import_file",
+    "profile", "revolve", "loft", "sweep", "shell", "draft", "sketch", "hole", "thread", "text", "plane", "axis", "import_file", "gear",
 }
 CREATES = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "copy", "mirror",
            "pattern_rect", "pattern_circ", "split", "profile", "revolve", "loft", "sweep", "sketch",
-           "text", "plane", "axis", "import_file"}
+           "text", "plane", "axis", "import_file", "gear"}
 
 
 class EditError(ValueError):
@@ -234,7 +234,7 @@ def auto_names(script: Script) -> list[str]:
 
 # Steps that make a new solid body get body1, body2... (a box rarely stays a box for long);
 # everything else is named after its operation (fillet1, pattern1, profile1...).
-NEW_BODY = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "copy", "mirror", "split", "import_file"}
+NEW_BODY = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "copy", "mirror", "split", "import_file", "gear"}
 
 
 def default_base(op: str, args: dict | None = None) -> str:
@@ -396,20 +396,95 @@ def dependents(text: str, name: str) -> list[str]:
     return out
 
 
-def delete_feature(text: str, name: str, cascade: bool = False) -> str:
+def _detach_edits(sc: "Script", st: "Stmt", gone_vars: set, gone_names: list):
+    """Edits that take every use of the gone steps out of statement `st`, when each use is one
+    item of a list that keeps others (cut(plate, [a, b]) -> cut(plate, [b])). None when a use
+    can't be taken out (the body being changed, a position, a face named in a string)."""
+    if any(_name_pattern(g).search(x) for g in gone_names for x in st.strs):
+        return None
+    node = sc.tree.body[sc.stmts.index(st)]
+    parent = {}
+    for n in ast.walk(node):
+        for c in ast.iter_child_nodes(n):
+            parent[c] = n
+    drop = {}                                    # list node -> elements to drop
+    for n in ast.walk(node):
+        if not (isinstance(n, ast.Name) and n.id in gone_vars and isinstance(n.ctx, ast.Load)):
+            continue
+        e = n                                    # the whole expression built on it: a[2], a.face("x").anchor()
+        while e in parent and (isinstance(parent[e], (ast.Subscript, ast.Attribute)) and parent[e].value is e
+                               or isinstance(parent[e], ast.Call) and parent[e].func is e):
+            e = parent[e]
+        lst = parent.get(e)
+        if not isinstance(lst, (ast.List, ast.Tuple)) or e not in lst.elts:
+            return None
+        drop.setdefault(lst, set()).add(e)
+    edits = []
+    for lst, gone in drop.items():
+        keep = [x for x in lst.elts if x not in gone]
+        if not keep:
+            return None
+        a, b = sc.span(lst)
+        src = ", ".join(sc.text[slice(*sc.span(x))] for x in keep)
+        if isinstance(lst, ast.Tuple):
+            src = f"({src},)" if len(keep) == 1 else f"({src})"
+        else:
+            src = f"[{src}]"
+        edits.append((a, b, src))
+    return edits
+
+
+def delete_plan(text: str, name: str) -> dict:
+    """What deleting `name` does to the steps that use it, keeping as many as possible:
+    'keeps': steps that only had it in a list (taken out of the list), 'also': steps that
+    can't do without it (deleted too, with whatever needs them)."""
     sc = Script(text)
-    deps = dependents(text, name)
-    if deps and not cascade:
-        raise EditError(f"'{name}' is used by {', '.join(deps)}")
     names = auto_names(sc)
     feats = sc.features()
-    victims = [name] + (deps if cascade else [])
-    spans = []
+    if name not in names:
+        raise EditError(f"no feature '{name}'")
+    i = names.index(name)
+    gone_vars = {feats[i].name} if feats[i].name else set()
+    gone_names = [name]
+    keeps, also, edits = [], [], []
+    for n, st in zip(names[i + 1:], feats[i + 1:]):
+        hit = bool(st.refs & gone_vars) or any(_name_pattern(g).search(x) for g in gone_names for x in st.strs)
+        if hit:
+            ed = _detach_edits(sc, st, gone_vars, gone_names)
+            if ed is None:
+                also.append(n)
+                gone_names.append(n)
+                if st.name:
+                    gone_vars.add(st.name)
+                continue
+            keeps.append(n)
+            edits += ed
+        if st.name:
+            gone_vars.discard(st.name)           # the variable now holds something else
+    return {"keeps": keeps, "also": also, "edits": edits}
+
+
+def delete_feature(text: str, name: str, cascade: bool = False, detach: bool = False) -> str:
+    """Delete a step. With steps that use it: cascade deletes them too; detach takes it out of
+    the lists that name it (a cut's tools...) and deletes only the steps that can't do without it."""
+    sc = Script(text)
+    deps = dependents(text, name)
+    names = auto_names(sc)
+    feats = sc.features()
+    edits = []
+    if detach:
+        plan = delete_plan(text, name)
+        victims = [name] + plan["also"]
+        edits = plan["edits"]
+    elif deps and not cascade:
+        raise EditError(f"'{name}' is used by {', '.join(deps)}")
+    else:
+        victims = [name] + (deps if cascade else [])
     for v in victims:
         st = feats[names.index(v)]
-        spans.append((st.start, _line_end(text, st.end)))
-    for s, e in sorted(spans, reverse=True):
-        text = text[:s] + text[e:]
+        edits.append((st.start, _line_end(text, st.end), ""))
+    for a, b, new in sorted(edits, reverse=True):
+        text = text[:a] + new + text[b:]
     return text
 
 

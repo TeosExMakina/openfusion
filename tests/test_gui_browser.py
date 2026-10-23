@@ -766,11 +766,158 @@ def test_an_odd_shaped_face_offers_its_corners_and_lines_its_grid_up_with_one(pa
     pg.wait_for_function("!window.ofApp.vp.anim")
     xy = pg.evaluate("""() => { const a = window.ofApp; const r = a.vp.canvas.getBoundingClientRect();
         const s = a.vp.toScreen([0.4, 29.7, 15]); return [r.left + s[0], r.top + s[1]]; }""")
-    pg.mouse.move(*xy)
-    pg.mouse.move(xy[0] + 1, xy[1])
-    pg.wait_for_timeout(100)
-    c = pg.evaluate("() => { const d = window.ofApp.dialog; return d.cands[0]; }")
+    c = pg.evaluate("(xy) => { const d = window.ofApp.dialog; d.hover({clientX: xy[0], clientY: xy[1], buttons: 0}); return d.cands[0]; }", xy)
     assert c["kind"] == "free" and re.search(r'\.corner\(\d+\)$', c["ref"]), c["ref"]
     assert c["p"] == pytest.approx([0, 30, 15])
     assert pg.evaluate("() => window.ofApp.vp.localFrame.o") == pytest.approx([0, 30, 15])
+    assert not errors, errors
+
+
+def test_delete_takes_a_tool_out_of_a_cut_and_editing_shows_the_model_at_that_step(page):
+    pg, f, errors = page
+    src = START + ('a = cylinder(r=2, h=20, at=plate.anchor("+Z").offset(x=-10).flipped())\n'
+                   'b = cylinder(r=3, h=20, at=plate.anchor("+Z").offset(x=10).flipped())\n'
+                   'm = move(body=b, dy=2)\n'
+                   'c = cut(target=plate, tools=[a, b])\n')
+    pg.evaluate("(t) => window.ofApp.action('/api/script', {text: t})", src)
+    pg.wait_for_function("window.ofApp.state.desc.features.length === 5")
+    # editing a step shows the model as it was then: a and b uncut, the later steps greyed
+    pg.dblclick('#timeline .chip[data-name="b"]')
+    pg.wait_for_function("window.ofApp.dialog && window.ofApp.vp.data.timeline.length === 3")
+    assert {"a", "b"} <= set(pg.evaluate("() => window.ofApp.vp.data.bodies.filter(b => b.role === 'solid').map(b => b.id)"))
+    pg.wait_for_function("document.querySelectorAll('#timeline .chip.after-marker').length === 2")
+    after = pg.eval_on_selector_all("#timeline .chip.after-marker", "els => els.map(e => e.dataset.name)")
+    assert after == ["m", "c"]
+    pg.click("#dlg-cancel")
+    pg.wait_for_function("window.ofApp.vp.data.timeline.length === 5")
+    # delete b: the menu offers to take it out of the cut (its move goes with it)
+    pg.click('#timeline .chip[data-name="b"]')
+    pg.keyboard.press("Delete")
+    pg.wait_for_selector("#ctx:not([hidden])")
+    item = pg.locator("#ctx button", has_text="taking it out of c")
+    assert "also deletes m" in item.inner_text()
+    item.click()
+    pg.wait_for_function("window.ofApp.state.desc.features.length === 3")
+    text = f.read_text()
+    assert "tools=[a]" in text and "b = " not in text and "m = " not in text
+    assert pg.evaluate("() => window.ofApp.vp.data.timeline.every(r => r.status === 'ok')")
+    assert not errors, errors
+
+
+def test_sketch_editing_tools_and_gear(page):
+    """Fillet a corner, offset the outline, mirror and pattern a hole, trim, draw a gear: each tool
+    in the app gives a sketch that solves and builds."""
+    pg, f, errors = page
+    pg.evaluate("""() => { const a = window.ofApp;
+        const hit = a.vp.faceMeshes.find(m => m.userData.body === 'plate' && m.userData.label === '+Z').userData;
+        a.selection = [{kind: 'face', body: 'plate', ref: hit.ref, label: '+Z', entry: hit.face, point: [0, 0, 10], key: 'face:' + hit.ref}];
+        a.openTool('sketch'); }""")
+    pg.wait_for_selector("#dialog.sk-panel #sk-ok")
+    pg.wait_for_function("window.ofApp.dialog.solved && !window.ofApp.vp.anim && !window.ofApp.dialog.busy")
+    box = pg.locator("#view").bounding_box()
+
+    def at(x, y):
+        sx, sy = pg.evaluate("([x, y]) => window.ofApp.dialog.screen([x, y])", [x, y])
+        return box["x"] + sx, box["y"] + sy
+
+    def click(x, y, **kw):
+        X, Y = at(x, y)
+        pg.mouse.move(X, Y)
+        pg.mouse.click(X, Y, **kw)
+
+    def settle():
+        pg.wait_for_timeout(60)
+        pg.wait_for_function("window.ofApp.dialog && window.ofApp.dialog.solved && !window.ofApp.dialog.busy")
+
+    model = lambda: pg.evaluate("() => window.ofApp.dialog.model")
+    pg.keyboard.press("r")
+    click(-10, -6)
+    pg.mouse.move(*at(3, 2))
+    pg.keyboard.type("20")
+    pg.keyboard.press("Tab")
+    pg.keyboard.type("12")
+    pg.keyboard.press("Enter")
+    settle()
+    corner = next(n for n, p in pg.evaluate("() => window.ofApp.dialog.solved.points").items() if p == pytest.approx([10, 6]))
+    # fillet the top right corner
+    pg.keyboard.press("Shift+F")
+    click(10, 6)
+    pg.wait_for_selector(".sk-form input")
+    pg.fill(".sk-form input", "3")
+    pg.press(".sk-form input", "Enter")
+    settle()
+    m = model()
+    arcs = [n for n, c in m["curves"].items() if c[0] == "arc"]
+    assert len(arcs) == 1 and [ "radius", arcs[0], 3] in m["cons"]
+    # offset the whole outline outward by 2
+    pg.keyboard.press("s")
+    pg.evaluate("() => { const d = window.ofApp.dialog; d.sel = Object.keys(d.model.curves).map(n => 'c:' + n); d.render(); }")
+    pg.click('[data-edit="offset"]')
+    pg.wait_for_selector(".sk-form input")
+    pg.fill(".sk-form input", "2")
+    pg.press(".sk-form input", "Enter")
+    settle()
+    m = model()
+    assert sum(1 for c in m["curves"].values() if c[0] == "arc") == 2
+    assert sum(1 for c in m["cons"] if c[0] == "distance") >= 4
+    # a hole, a construction line down the middle; mirror the hole across it, then pattern it
+    pg.keyboard.press("c")
+    click(4, 0)
+    pg.mouse.move(*at(5, 0))
+    pg.keyboard.type("2")
+    pg.keyboard.press("Enter")
+    settle()
+    hole = next(n for n, c in model()["curves"].items() if c[0] == "circle")
+    pg.keyboard.press("x")                              # construction on
+    pg.keyboard.press("l")
+    click(0, -12)
+    click(0, 12)
+    pg.keyboard.press("Escape")
+    pg.keyboard.press("x")
+    settle()
+    axis = next(n for n, c in model()["curves"].items() if c[0] == "line" and "construction" in c)
+    pg.keyboard.press("s")
+    pg.evaluate("([h, a]) => { const d = window.ofApp.dialog; d.sel = ['c:' + h, 'c:' + a]; d.render(); }", [hole, axis])
+    pg.keyboard.press("Shift+M")
+    settle()
+    m = model()
+    assert sum(1 for c in m["curves"].values() if c[0] == "circle") == 2
+    assert any(c[0] == "symmetric" and c[3] == axis for c in m["cons"])
+    pg.evaluate("(h) => { const d = window.ofApp.dialog; d.sel = ['c:' + h]; d.render(); }", hole)
+    pg.keyboard.press("Shift+R")
+    pg.wait_for_selector(".sk-form input")
+    vals = {"nx": "1", "dx": "0", "ny": "2", "dy": "-4"}
+    for k, v in vals.items():
+        pg.fill(f'.sk-form input[data-n="{k}"]', v)
+    pg.press('.sk-form input[data-n="dy"]', "Enter")
+    settle()
+    assert sum(1 for c in model()["curves"].values() if c[0] == "circle") == 3
+    # trim: the construction line's part above the outline goes (it crosses the offset outline)
+    pg.keyboard.press("Shift+T")
+    click(0, 11.5)
+    settle()
+    a, b = pg.evaluate("(n) => window.ofApp.dialog.curveGeom(n)", axis)
+    assert max(a[1], b[1]) == pytest.approx(8, abs=1e-6)            # cut at the offset outline's top
+    # a gear: centre, then type module 1 and 16 teeth
+    pg.keyboard.press("g")
+    click(-30, 0)
+    pg.mouse.move(*at(-22, 0))
+    pg.keyboard.type("1")
+    pg.keyboard.press("Tab")
+    pg.keyboard.type("16")
+    pg.keyboard.press("Enter")
+    settle()
+    g = [c for c in model()["curves"].values() if c[0] == "gear"]
+    assert g == [["gear", g[0][1], 1, 16]]
+    # undo takes the gear away again, in one step
+    pg.keyboard.press("Meta+z")
+    settle()
+    assert not any(c[0] == "gear" for c in model()["curves"].values())
+    pg.keyboard.press("Meta+Shift+z")
+    settle()
+    pg.click("#sk-ok")
+    pg.wait_for_function("document.getElementById('dialog').hidden")
+    r = Engine().run_file(str(f))
+    assert r.ok, r.report()
+    assert '"gear"' in f.read_text()
     assert not errors, errors

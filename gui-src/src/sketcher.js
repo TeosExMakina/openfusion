@@ -38,8 +38,19 @@ const DRAW = [
   { id: "arc", label: "Arc", key: "A", help: "Click the centre, the start, then the end (counterclockwise)." },
   { id: "ellipse", label: "Ellipse", key: "Shift+E", help: "Click the centre, then a corner of the box around the ellipse (its half-widths along X and Y)." },
   { id: "point", label: "Point", key: "O", help: "Click to place a free point (a centre, a guide)." },
+  { id: "gear", label: "Gear", key: "G", help: "Click the centre, then out to the size you want: type the module and teeth (Tab), Enter places it. Gears mesh with the same module, centres module × (teeth1 + teeth2) / 2 apart." },
+  { id: "trim", label: "Trim", key: "Shift+T", help: "Click the piece of a line, arc or circle to take out: it is cut where other curves cross it (a curve nothing crosses goes whole)." },
+  { id: "fillet", label: "Fillet", key: "Shift+F", help: "Click a corner where two lines meet, then type the radius: the corner becomes an arc tangent to both." },
   { id: "project", label: "Project", key: "J", help: "Click edges of the model to bring them into the sketch: fixed, and they follow the model when it changes. Their ends are points you can constrain to." },
   { id: "dim", label: "Dimension", key: "D", help: "Select what to measure first (a line, a circle, two points, a point and a line, two lines), then D." },
+];
+
+// Tools that change what is selected (they ask for what else they need)
+const EDITS = [
+  { id: "offset", label: "Offset", key: "Shift+O", help: "Select lines, arcs and circles (a chain stays joined), then Offset and type the distance: outward (or to the left), negative for the other side. Held at that distance." },
+  { id: "mirror", label: "Mirror", key: "Shift+M", help: "Select curves, then Mirror and click the mirror line (or select the line last). Every new point is held symmetric." },
+  { id: "pattern", label: "Pattern", key: "Shift+R", help: "Select curves, then Pattern: copies in rows and columns, held at the spacings (counts include the original)." },
+  { id: "circular", label: "Circular", key: "Shift+Q", help: "Select curves, then Circular and click the centre point: copies turned round it." },
 ];
 
 // The type-in boxes shown while drawing (Tab moves between them, Enter places the shape).
@@ -50,6 +61,7 @@ const HUD = {
   circle: [["diameter", "Diameter"]],
   ellipse: [["rx", "Half-width X"], ["ry", "Half-width Y"]],
   arc: [["radius", "Radius"], ["sweep", "Sweep °"]],
+  gear: [["module", "Module"], ["teeth", "Teeth"]],
 };
 const num = (t) => { const v = String(t).trim(); return /^-?(\d+\.?\d*|\.\d+)$/.test(v) ? Number(v) : v ? { expr: v } : null; };
 const val = (v) => (typeof v === "number" ? v : null);           // a plain number to draw with (expressions: use the cursor)
@@ -89,9 +101,10 @@ export class Sketcher {
         this.at = src.at; this.spin = src.spin;
         for (const [n, v] of Object.entries(src.points)) this.model.points[n] = Array.isArray(v) ? v.slice() : v;
         for (const [n, v] of Object.entries(src.curves)) this.model.curves[n] = v.slice();
-      for (const v of src.constraints) if (!Array.isArray(v)) throw new Error("each constraint is written (kind, ...), e.g. (\"horizontal\", \"l1\")");
         this.model.cons = src.constraints.map((c) => c.slice());
       } catch (e) { toast(e.message, true); this.app.closeDialog(); return; }
+      // the model as it is at this sketch, like Fusion: later steps don't get in the way
+      post("/api/scene_at", { name: this.edit }).then((r) => { if (this.app.dialog === this) this.vp.setScene(r.scene); }).catch(() => {});
       await this.solve();
       if (this.info) this.enterPlane(this.info.frame);
       this.setTool("select");
@@ -190,17 +203,18 @@ export class Sketcher {
     return null;
   }
 
-  pickAt(ev) {
+  pickAt(ev, only = null) {          // only: "p" points, "c" curves, "l" lines
     const [mx, my] = this.evXY(ev);
     let best = null, bd = PICK_PT;
-    for (const n of Object.keys(this.allPoints())) {
+    for (const n of only && only !== "p" ? [] : Object.keys(this.allPoints())) {
       const [sx, sy] = this.screen(this.pos(n));
       const d = Math.hypot(sx - mx, sy - my);
       if (d < bd) { bd = d; best = "p:" + n; }
     }
-    if (best) return best;
+    if (best || only === "p") return best;
     bd = PICK_CURVE;
     for (const n of Object.keys(this.model.curves)) {
+      if (only === "l" && this.model.curves[n][0] !== "line") continue;
       const sp = this.curveScreenPts(n);
       for (let i = 0; i + 1 < sp.length; i++) {
         const d = segDist([mx, my], sp[i], sp[i + 1]);
@@ -229,7 +243,9 @@ export class Sketcher {
       return true;
     }
     this.cursor = this.snapped(ev);
-    this.hoverKey = this.tool === "select" || this.tool === "dim" ? this.pickAt(ev) : null;
+    const want = this.picking ? this.picking.want : this.tool === "trim" ? "c" : this.tool === "fillet" ? "p" : null;
+    if (want) { const k = this.pickAt(ev, want); this.hoverKey = k; }
+    else this.hoverKey = this.tool === "select" || this.tool === "dim" ? this.pickAt(ev) : null;
     this.updateHud();
     const p = this.cursor && this.cursor.p;
     this.app.showTip(p ? `(${fmt(p[0])}, ${fmt(p[1])})${this.cursor.name ? " · " + this.cursor.name : ""}` : null, ev);
@@ -265,6 +281,29 @@ export class Sketcher {
       this.remember();
       this.addCurve("e", ["project", { expr: ref }]);
       this.solve().then((ok) => { if (!ok) this.undo(true); });
+      return;
+    }
+    if (this.picking) {
+      const k = this.pickAt(ev, this.picking.want);
+      if (!k) { toast(this.picking.miss, true); return; }
+      const pk = this.picking; this.picking = null; this.app.setHint("");
+      pk.done(k.slice(2));
+      return;
+    }
+    if (this.tool === "trim") {
+      const k = this.pickAt(ev, "c"), p = this.local(ev);
+      if (!k || !p) return;
+      this.sketchEdit("trim", { curve: k.slice(2), at: p });
+      return;
+    }
+    if (this.tool === "fillet") {
+      const k = this.pickAt(ev, "p");
+      if (!k) { toast("Click a corner where two lines meet", true); return; }
+      const corner = k.slice(2);
+      this.askNumbers("Fillet", [["radius", "Radius", this.lastFillet || 2]], this.pos(corner), (v) => {
+        this.lastFillet = v.radius;
+        this.sketchEdit("fillet", { corner, radius: v.radius });
+      });
       return;
     }
     const s = this.snapped(ev);
@@ -389,6 +428,16 @@ export class Sketcher {
       done(); this.solve();
       return;
     }
+    if (t === "gear") {
+      if (!this.pending.length) { this.pending = [s]; this.render(); this.showHud(); return; }
+      const c = this.pending[0]; this.pending = [];
+      const { module, teeth } = this.gearSize(s.p);
+      this.remember();
+      this.addCurve("g", ["gear", this.pointFor(c), module, teeth]);
+      done();
+      this.solve().then((ok) => { if (!ok) this.undo(true); });
+      return;
+    }
     if (t === "arc") {
       this.pending.push(s);
       if (this.pending.length < 3) { this.render(); this.showHud(); return; }
@@ -454,6 +503,18 @@ export class Sketcher {
     return true;
   }
 
+  // a gear being drawn: the module typed (else 1, or what the last gear had), the teeth typed or
+  // as many as reach the cursor
+  gearSize(cur) {
+    const L = {};
+    for (const f of (this.hud && this.hud.fields) || []) if (f.locked && val(f.value) !== null) L[f.key] = val(f.value);
+    const a = this.pending[0] ? this.pending[0].p : cur;
+    const module = L.module || this.lastModule || 1;
+    const teeth = Math.max(6, Math.round(L.teeth || (2 * Math.hypot(cur[0] - a[0], cur[1] - a[1]) / module)));
+    this.lastModule = module;
+    return { module, teeth };
+  }
+
   // where the shape's next point goes: the cursor, held to whatever was typed
   hudTarget(cur) {
     const a = this.pending[0] && this.pending[0].p;
@@ -491,7 +552,9 @@ export class Sketcher {
   updateHud() {
     if (!this.hud || !this.cursor || !this.pending.length) return;
     const a = this.pending[0].p, b = this.hudTarget(this.cursor.p);
+    const gs = this.tool === "gear" ? this.gearSize(this.cursor.p) : {};
     const live = {
+      module: gs.module, teeth: gs.teeth,
       length: Math.hypot(b[0] - a[0], b[1] - a[1]), angle: ((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI) + 360) % 360,
       width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]), diameter: 2 * Math.hypot(b[0] - a[0], b[1] - a[1]),
       rx: Math.abs(b[0] - a[0]), ry: Math.abs(b[1] - a[1]), radius: Math.hypot(b[0] - a[0], b[1] - a[1]),
@@ -633,6 +696,85 @@ export class Sketcher {
   }
   closeAsk() { if (this.ask) { this.ask.remove(); this.ask = null; } }
 
+  // ------------------------------------------------------------------ editing tools (worked out by the engine)
+  selectedCurves() { return this.sel.filter((k) => k.startsWith("c:")).map((k) => k.slice(2)); }
+
+  runEdit(id) {
+    const curves = this.selectedCurves();
+    const near = () => { const g = curves.length ? this.curveGeom(curves[0]) : null; return g ? g[0] : (this.cursor ? this.cursor.p : [0, 0]); };
+    if (!curves.length) { toast(`${EDITS.find((e) => e.id === id).label}: select curves first (Shift adds)`, true); return; }
+    if (id === "offset") {
+      this.askNumbers("Offset", [["distance", "Distance", this.lastOffset || 2]], near(), (v) => {
+        this.lastOffset = v.distance;
+        this.sketchEdit("offset", { curves, distance: v.distance });
+      });
+    } else if (id === "mirror") {
+      const last = curves[curves.length - 1];
+      if (curves.length > 1 && this.model.curves[last][0] === "line") { this.sketchEdit("mirror", { curves: curves.slice(0, -1), line: last }); return; }
+      this.pick("l", "Click the mirror line", "Click a line to mirror across", (line) => this.sketchEdit("mirror", { curves, line }));
+    } else if (id === "pattern") {
+      this.askNumbers("Pattern", [["nx", "Columns (X)", 3], ["dx", "Spacing X", 10], ["ny", "Rows (Y)", 1], ["dy", "Spacing Y", 10]], near(),
+        (v) => this.sketchEdit("pattern_rect", v.nx * v.ny < 2 ? { curves, nx: 0 } : { curves, nx: v.nx, dx: v.dx, ny: v.ny, dy: v.dy }));
+    } else if (id === "circular") {
+      this.pick("p", "Click the centre point to turn the copies round", "Click a point (the centre)", (centre) => {
+        this.askNumbers("Circular pattern", [["count", "Count", 6], ["angle", "Angle °", 360]], this.pos(centre),
+          (v) => this.sketchEdit("pattern_circ", { curves, centre, count: v.count, angle: v.angle }));
+      });
+    }
+  }
+
+  pick(want, hint, miss, done) {
+    this.picking = { want, miss, done };
+    this.app.setHint(hint);
+    this.setStatus(hint);
+  }
+
+  // a small box of number fields by the sketch; Enter (or OK) runs done({key: number})
+  askNumbers(title, fields, at, done) {
+    this.closeAsk();
+    const box = document.createElement("div");
+    box.className = "sk-ask sk-form";
+    box.innerHTML = `<b>${esc(title)}</b>` + fields.map(([k, l, v]) => `<label>${esc(l)} <input data-n="${k}" value="${esc(v)}" spellcheck="false" autocomplete="off"></label>`).join("")
+      + `<div class="sk-alt"><button type="button" data-ok class="primary">OK</button><button type="button" data-cancel>Cancel</button></div>`;
+    this.labels.appendChild(box);
+    const [sx, sy] = this.screen(at);
+    box.style.left = `${sx + 14}px`; box.style.top = `${sy - 14}px`;
+    const inputs = [...box.querySelectorAll("input")];
+    const submit = () => {
+      const out = {};
+      for (const i of inputs) {
+        const v = Number(i.value.trim());
+        if (!i.value.trim() || !Number.isFinite(v)) { toast(`${i.parentElement.textContent.trim()}: type a number`, true); i.focus(); return; }
+        out[i.dataset.n] = v;
+      }
+      this.closeAsk();
+      done(out);
+    };
+    inputs.forEach((i, n) => i.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); this.closeAsk(); }
+      else if (e.key === "Enter") { e.preventDefault(); submit(); }
+      else if (e.key === "Tab") { e.preventDefault(); const nx = inputs[(n + (e.shiftKey ? inputs.length - 1 : 1)) % inputs.length]; nx.focus(); nx.select(); }
+    }));
+    box.querySelector("[data-ok]").addEventListener("click", submit);
+    box.querySelector("[data-cancel]").addEventListener("click", () => this.closeAsk());
+    setTimeout(() => { inputs[0].focus(); inputs[0].select(); }, 0);
+    this.ask = box;
+  }
+
+  async sketchEdit(op, args) {
+    let out;
+    try {
+      out = await post("/api/sketch_edit", { op, args, model: this.model, solved: this.solved ? { points: this.solved.points, curves: this.solved.curves } : {} });
+    } catch (e) { toast(e.message, true); return false; }
+    this.remember();
+    this.model = { points: out.points, curves: out.curves, cons: out.cons };
+    this.sel = (out.select || []).filter((k) => k.startsWith("c:"));
+    if (!(await this.solve())) { this.undo(true); toast("That edit can't be solved with the sketch's constraints; undone", true); return false; }
+    this.refreshSide();
+    return true;
+  }
+
   // ------------------------------------------------------------------ deleting
   deleteSelection() {
     if (!this.sel.length) return;
@@ -751,6 +893,7 @@ export class Sketcher {
     if (mod && ev.code === "KeyZ") { ev.preventDefault(); if (ev.shiftKey) this.redo(); else this.undo(); return true; }
     if (ev.key === "Escape") {
       if (this.ask) { this.closeAsk(); return true; }
+      if (this.picking) { this.picking = null; this.app.setHint(""); this.render(); return true; }
       if (this.pending.length) { this.pending = []; this.hideHud(); this.render(); return true; }
       if (this.sel.length) { this.sel = []; this.render(); this.refreshSide(); return true; }
       if (this.tool !== "select") { this.setTool("select"); return true; }
@@ -762,6 +905,8 @@ export class Sketcher {
     if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); this.deleteSelection(); return true; }
     if (ev.key === "x" || ev.key === "X") { this.toggleConstruction(); return true; }
     const k = (ev.shiftKey ? "Shift+" : "") + ev.key.toUpperCase();
+    const ed = EDITS.find((t) => t.key === k);
+    if (ed) { this.runEdit(ed.id); return true; }
     const d = DRAW.find((t) => t.key === k);
     if (d) { if (d.id === "dim") { this.setTool("dim"); if (this.sel.length) this.tryDimension(); } else this.setTool(d.id); return true; }
     const rule = RULES.find((r) => r.key === k);
@@ -784,7 +929,7 @@ export class Sketcher {
 
   setTool(id) {
     if (this.tool === "project" && id !== "project") this.vp.setHover(null);
-    this.tool = id; this.pending = []; this.hideHud();
+    this.tool = id; this.pending = []; this.hideHud(); this.picking = null;
     if (id !== "select" && id !== "dim") this.sel = [];
     this.labels.classList.toggle("drawing", id !== "select" && id !== "dim");    // labels don't catch drawing clicks
     this.renderPanel(); this.render();
@@ -806,6 +951,8 @@ export class Sketcher {
       <div class="sk-tools" role="toolbar" aria-label="Draw">${DRAW.map((t) =>
         `<button type="button" data-draw="${t.id}" aria-pressed="${t.id === this.tool}" title="${esc(t.help)}">${esc(t.label)} ${kb(t.key)}</button>`).join("")}
         <button type="button" data-construction aria-pressed="${this.construction}" title="New curves (or the selected ones) become construction: guides that bound no region">Construction ${kb("X")}</button></div>
+      <div class="sk-tools" role="toolbar" aria-label="Edit">${EDITS.map((t) =>
+        `<button type="button" data-edit="${t.id}" title="${esc(t.help)}">${esc(t.label)} ${kb(t.key)}</button>`).join("")}</div>
       <div class="sk-tools" role="toolbar" aria-label="Constrain">${RULES.map((r) =>
         `<button type="button" data-rule="${r.id}" title="${esc(r.label + ": " + r.help)}">${r.glyph} ${esc(r.label)} ${kb(r.key)}</button>`).join("")}</div>
       <div class="sk-status"></div>
@@ -816,6 +963,7 @@ export class Sketcher {
       if (b.dataset.draw === "dim") { this.setTool("dim"); if (this.sel.length) this.tryDimension(); } else this.setTool(b.dataset.draw);
     }));
     this.panel.querySelector("[data-construction]").addEventListener("click", () => this.toggleConstruction());
+    this.panel.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => this.runEdit(b.dataset.edit)));
     this.panel.querySelectorAll("[data-rule]").forEach((b) => b.addEventListener("click", () => this.apply(b.dataset.rule)));
     this.panel.querySelector("#sk-ok").addEventListener("click", () => this.ok());
     this.panel.querySelector("#sk-cancel").addEventListener("click", () => this.app.closeDialog());
@@ -887,6 +1035,11 @@ export class Sketcher {
       html += this.field("Radius", "radius", i >= 0 && this.model.cons[i][0] === "radius" ? dimv(i) : fmt(r), { lock: i });
     } else if (kind === "ellipse") {
       html += this.field("Half-width X", "rx", fx(c[2])) + this.field("Half-width Y", "ry", fx(c[3])) + this.field("Angle °", "eangle", fx(typeof c[4] === "number" || isExpr(c[4]) ? c[4] : 0));
+    } else if (kind === "gear" || kind === "ring_gear") {
+      html += this.field("Module", "module", fx(c[2])) + this.field("Teeth", "teeth", fx(c[3]))
+        + `<span class="sk-hint">Pitch Ø ${fmt(Number(c[2]) * Number(c[3]))} mm; options (pressure angle, angle, backlash) in the Text tab</span>`;
+    } else if (kind === "rack") {
+      html += this.field("Module", "rmodule", fx(c[3]));
     } else if (kind === "parametric") {
       html += this.field("x(t) =", "px", c[1]) + this.field("y(t) =", "py", c[2]) + this.field("t from", "t0", fx(c[3])) + this.field("t to", "t1", fx(c[4]));
     }
@@ -988,7 +1141,7 @@ export class Sketcher {
     if (key === "length") return asDim(["length"], "length", [n], v);
     if (key === "diameter") return asDim(["diameter", "radius"], "diameter", [n], v);
     if (key === "radius") return asDim(["radius", "diameter"], "radius", [n], v);
-    const slot = { rx: 2, ry: 3, eangle: 4, px: 1, py: 2, t0: 3, t1: 4 }[key];
+    const slot = { rx: 2, ry: 3, eangle: 4, px: 1, py: 2, t0: 3, t1: 4, module: 2, teeth: 3, rmodule: 3 }[key];
     if (slot === undefined || !c) return;
     this.remember();
     const value = key === "px" || key === "py" ? String(text) : v;
@@ -1066,6 +1219,12 @@ export class Sketcher {
       if (this.tool === "circle" || (this.tool === "arc" && this.pending.length === 1)) {
         const r = Math.hypot(cur[0] - a[0], cur[1] - a[1]);
         addLine(Array.from({ length: 65 }, (_, i) => { const t = i / 64 * 2 * Math.PI; return [a[0] + r * Math.cos(t), a[1] + r * Math.sin(t)]; }), "--sel", true);
+      }
+      if (this.tool === "gear") {
+        const { module, teeth } = this.gearSize(this.cursor.p), rp = module * teeth / 2;
+        for (const r of [rp, rp + module, rp - 1.25 * module]) {
+          addLine(Array.from({ length: 97 }, (_, i) => { const t = i / 96 * 2 * Math.PI; return [a[0] + r * Math.cos(t), a[1] + r * Math.sin(t)]; }), "--sel", r !== rp + module);
+        }
       }
       if (this.tool === "ellipse") {
         const rx = Math.abs(cur[0] - a[0]), ry = Math.abs(cur[1] - a[1]);
@@ -1150,3 +1309,4 @@ function segDist(p, a, b) {
 
 export const SKETCH_RULES = RULES;
 export const SKETCH_DRAW = DRAW;
+export const SKETCH_EDITS = EDITS;

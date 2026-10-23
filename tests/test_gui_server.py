@@ -136,7 +136,7 @@ def test_body_expressions_for_pattern_copies(sess):
 def test_delete_check_mode(sess):
     route(sess, "/api/apply", {"op": "sphere", "args": {"r": "2", "at": 'plate.anchor("+Z")'}})
     chk = route(sess, "/api/delete", {"name": "plate", "mode": "check"})
-    assert chk == {"dependents": ["body1"], "can_remove": True}
+    assert chk == {"dependents": ["body1"], "can_remove": True, "detach": {"keeps": [], "also": ["body1"]}}
     route(sess, "/api/apply", {"op": "cut", "args": {"target": "plate", "tools": "[body1]"}})
     chk = route(sess, "/api/delete", {"name": "body1", "mode": "check"})
     assert chk["can_remove"] is False          # consumed by the cut already
@@ -427,3 +427,82 @@ def test_sketch_text_is_read_back_for_the_sketch_panel():
     for bad, msg in (("points={", "doesn't read"), ("at=1", "not at"), ("{}", "points=..."), ('curves={"x": 3}', "(kind, ...)")):
         with pytest.raises(ValueError, match=re.escape(msg)):
             parse_text(bad)
+
+
+def test_undo_and_redo_bring_the_marker_back_with_the_file(sess):
+    for _ in range(3):
+        route(sess, "/api/apply", {"op": "box", "args": {"length": "2", "width": "2", "height": "2"}})
+    route(sess, "/api/marker", {"name": "body1"})
+    out = route(sess, "/api/apply", {"op": "sphere", "args": {"r": "1"}})        # goes in after body1
+    assert out["state"]["marker"] == "body4"
+    st = route(sess, "/api/undo", {})["state"]
+    assert st["marker"] == "body1" and [f["name"] for f in st["desc"]["features"]] == ["plate", "body1", "body2", "body3"]
+    assert [r["name"] for r in st["scene"]["timeline"]] == ["plate", "body1"]          # still rolled back
+    st = route(sess, "/api/redo", {})["state"]
+    assert st["marker"] == "body4"
+    # a delete while rolled back, undone: the step and the marker on it come back
+    route(sess, "/api/delete", {"name": "body4", "mode": "delete"})
+    assert sess.marker == "body1"
+    route(sess, "/api/marker", {"name": None})
+    route(sess, "/api/undo", {})
+    assert sess.marker == "body4"                    # where it was before the delete
+    # "Remove instead" while rolled back: the marker moves onto the remove step, so it shows
+    route(sess, "/api/marker", {"name": "body2"})
+    route(sess, "/api/apply", {"op": "cut", "args": {"target": "plate", "tools": "[body1]"}})
+    out = route(sess, "/api/delete", {"name": "body2", "mode": "remove"})
+    assert sess.marker == out["name"] and "body2" not in [b["id"] for b in sess.scene["bodies"] if b["role"] != "removed"]
+
+
+TOOLS_SRC = START + '''a = cylinder(r=2, h=10, at=plate.anchor("+Z").offset(x=-10).flipped())
+b = cylinder(r=3, h=10, at=plate.anchor("+Z").offset(x=10).flipped())
+m = move(body=b, dy=2)
+pat = pattern_rect(body=a, x=(3, -6))
+c = cut(target=plate, tools=[a, b, pat[1], pat[2]])
+s = sphere(r=1, at=a.anchor("+Z"))
+'''
+
+
+def test_delete_can_take_a_step_out_of_the_lists_that_use_it(tmp_path):
+    f = tmp_path / "p.ofs"
+    f.write_text(TOOLS_SRC)
+    sess = Session(str(f))
+    chk = route(sess, "/api/delete", {"name": "b", "mode": "check"})
+    assert chk["detach"] == {"keeps": ["c"], "also": ["m"]}               # m moves b: it goes with it
+    route(sess, "/api/delete", {"name": "b", "mode": "detach"})
+    assert "tools=[a, pat[1], pat[2]]" in sess.text and "b = " not in sess.text and "m = " not in sess.text
+    assert all(r.status == "ok" for r in sess.result.results)
+    chk = route(sess, "/api/delete", {"name": "pat", "mode": "check"})
+    assert chk["detach"] == {"keeps": ["c"], "also": []}
+    route(sess, "/api/delete", {"name": "pat", "mode": "detach"})
+    assert "tools=[a])" in sess.text
+    # a: the cut keeps nothing else, and the sphere sits on it: both go
+    chk = route(sess, "/api/delete", {"name": "a", "mode": "check"})
+    assert chk["detach"] == {"keeps": [], "also": ["c", "s"]}
+    # one undo puts it all back
+    route(sess, "/api/undo", {})
+    assert "tools=[a, pat[1], pat[2]]" in sess.text
+
+
+def test_editing_a_step_shows_the_model_at_that_step(tmp_path):
+    f = tmp_path / "p.ofs"
+    f.write_text(TOOLS_SRC)
+    sess = Session(str(f))
+    sc = route(sess, "/api/scene_at", {"name": "b"})["scene"]
+    assert [r["name"] for r in sc["timeline"]] == ["plate", "a", "b"]
+    assert {"a", "b"} <= {x["id"] for x in sc["bodies"] if x["role"] == "solid"}           # not cut away yet
+    pv = route(sess, "/api/preview", {"op": "cylinder", "args": {"r": "4", "h": "10", "at": 'plate.anchor("+Z").offset(x=10).flipped()'}, "edit": "b"})
+    assert [r["name"] for r in pv["scene"]["timeline"]] == ["plate", "a", "b"]
+    assert route(sess, "/api/scene_at", {"name": "nothing"})["scene"] is sess.scene
+
+
+def test_sketch_edit_route_answers_with_the_changed_sketch():
+    s = Session.__new__(Session)
+    model = {"points": {"a": [0, 0], "b": [10, 0], "c": [10, 10]},
+             "curves": {"l1": ["line", "a", "b"], "l2": ["line", "b", "c"]}, "cons": []}
+    solved = {"points": {"a": [0, 0], "b": [10, 0], "c": [10, 10]}, "curves": {}}
+    out = route(s, "/api/sketch_edit", {"op": "fillet", "model": model, "solved": solved, "args": {"corner": "b", "radius": 2}})
+    assert any(c[0] == "arc" for c in out["curves"].values()) and out["select"]
+    with pytest.raises(se.EditError, match="doesn't fit"):
+        route(s, "/api/sketch_edit", {"op": "fillet", "model": model, "solved": solved, "args": {"corner": "b", "radius": 50}})
+    with pytest.raises(se.EditError, match="radius"):
+        route(s, "/api/sketch_edit", {"op": "fillet", "model": model, "solved": solved, "args": {"corner": "b"}})

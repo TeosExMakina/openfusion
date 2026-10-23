@@ -106,10 +106,30 @@ def _torus(ctx, R, r, at=None, spin=0.0, role="solid"):
 
 
 @_record("create")
-def _coil(ctx, R, turns, pitch, size, section="circle", hand="right", at=None, spin=0.0, role="solid"):
-    """Helical coil rising along Z, starting at angle 0. size = section diameter or side."""
+def _coil(ctx, R, turns, pitch, size, section="circle", hand="right", at=None, spin=0.0, role="solid", side="outside"):
+    """Helical coil rising along Z, starting at angle 0. size = section diameter or side.
+    Thread profiles: section='iso' (60 degree V), 'acme' (29 degree), 'trapezoidal' (metric Tr,
+    30 degree) or 'buttress' (7/45 degree, the steep side up); size is then the thread's pitch
+    (the profile is sized from it; usually the coil's pitch), and the thread stands on the
+    cylinder of radius R: side='outside' for a thread on a shaft of radius R (join them),
+    'inside' for a thread inside a hole of radius R (cut it from the hole's wall, or join it to
+    a nut). Faces: 'start', 'end' and 'outer', 'inner', 'top', 'bottom' (square and threads)."""
     ctx.put(BUILDERS["coil"](ctx.fid, _creation_frame(ctx, at, spin, pitch), _role(role), R, turns, abs(pitch), size,
-                             section, hand))
+                             section, hand, side))
+
+
+@_record("create")
+def _gear(ctx, module, teeth, thickness, pressure_angle=20.0, backlash=0.0, bore=0.0, helix=0.0, herringbone=False,
+          internal=False, rim=None, at=None, spin=0.0, role="solid"):
+    """Involute spur gear on the frame `at`, its axis along Z, `thickness` thick; tooth 0 along X.
+    module: tooth size (pitch diameter = module * teeth); gears mesh with the same module and
+    pressure angle, their centres module * (teeth1 + teeth2) / 2 apart. backlash: play at the pitch
+    circle in mm (0.1-0.2 for printed gears). bore: a hole through the middle (diameter).
+    helix: helix angle in degrees for a helical gear (mesh a +angle gear with a -angle one);
+    herringbone=True turns it back halfway (no side thrust). internal=True: a ring gear, teeth
+    inside, rim = its outside diameter. Faces: '+Z', '-Z', 'teeth#k', 'bore' / 'rim'."""
+    ctx.put(BUILDERS["gear"](ctx.fid, _creation_frame(ctx, at, spin), _role(role), module, teeth, thickness,
+                             pressure_angle, backlash, bore, helix, herringbone, internal, rim))
 
 
 @_record("create")
@@ -855,7 +875,7 @@ def _remove(ctx, body):
 
 
 # public names
-box, cylinder, cone, sphere, torus, coil, polygon = _box, _cylinder, _cone, _sphere, _torus, _coil, _polygon
+box, cylinder, cone, sphere, torus, coil, polygon, gear = _box, _cylinder, _cone, _sphere, _torus, _coil, _polygon, _gear
 place, place_on_bed, move, rotate, copy = _place, _place_on_bed, _move, _rotate, _copy
 pattern_rect, pattern_circ, mirror, scale = _pattern_rect, _pattern_circ, _mirror, _scale
 fillet, chamfer, extrude, split = _fillet, _chamfer, _extrude, _split

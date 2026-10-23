@@ -182,9 +182,9 @@ class Body:
 
     def edges_named(self, text: str) -> list:
         """'+X+Z', 'rim+Z', 'a|b' -> edges shared by the two named faces; on a sketch, a curve's name."""
-        for n, e, _ in self.curves():
-            if n == text:
-                return [e]
+        mine = [e for n, e, _ in self.curves() if n == text]
+        if mine:
+            return mine
         a, b = split_edge_name(text)
         fa, fb = self.faces_named(a), self.faces_named(b)
         if not fa or not fb:

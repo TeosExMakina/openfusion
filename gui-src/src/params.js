@@ -22,6 +22,10 @@ export class ParamsPanel {
   render() {
     const rows = this.rows();
     const values = (this.app.state && this.app.state.scene && this.app.state.scene.params) || {};
+    // a refresh that changes nothing here leaves the table alone (and whatever is being typed in it)
+    const key = JSON.stringify([rows, values, this.error]);
+    if (key === this.lastKey && this.el.firstChild && !this.focus) return;
+    this.lastKey = key;
     const body = rows.map((r) => `<tr data-row="${esc(r.name)}">
         <td><input data-col="name" value="${esc(r.name)}" aria-label="Name" spellcheck="false" autocomplete="off"></td>
         <td><input data-col="expr" value="${esc(r.expr)}" aria-label="Expression for ${esc(r.name)}" spellcheck="false" autocomplete="off"></td>

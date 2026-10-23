@@ -34,8 +34,9 @@ class Session:
         self.lock = threading.RLock()
         self.text = pathlib.Path(self.path).read_text(encoding="utf-8")
         self.mtime = os.stat(self.path).st_mtime_ns
-        self.undo: list[tuple[str, str]] = []   # (text, label)
-        self.redo: list[tuple[str, str]] = []
+        # (text, label, marker): undo puts the file back and the timeline marker where it was
+        self.undo: list[tuple[str, str, str | None]] = []
+        self.redo: list[tuple[str, str, str | None]] = []
         self.marker: str | None = None          # show the model up to this feature
         self.version = 0
         self.result = None
@@ -79,13 +80,20 @@ class Session:
             self.version += 1
 
     # ------------------------------------------------------------ writing
-    def write(self, new_text: str, label: str):
+    def write(self, new_text: str, label: str, marker=...):
+        """Save a change (one undo step). marker: where the timeline marker goes with it
+        (left alone if not given); undo brings back the marker as it was before."""
         with self.lock:
             if new_text == self.text:
+                if marker is not ... and marker != self.marker:
+                    self.marker = marker
+                    self.rebuild()
                 return
-            self.undo.append((self.text, label))
+            self.undo.append((self.text, label, self.marker))
             self.undo = self.undo[-200:]
             self.redo.clear()
+            if marker is not ...:
+                self.marker = marker
             self._commit(new_text)
 
     def _commit(self, new_text: str):
@@ -100,8 +108,9 @@ class Session:
         with self.lock:
             if not self.undo:
                 raise se.EditError("nothing to undo")
-            text, label = self.undo.pop()
-            self.redo.append((self.text, label))
+            text, label, marker = self.undo.pop()
+            self.redo.append((self.text, label, self.marker))
+            self.marker = marker
             self._commit(text)
             return label
 
@@ -109,8 +118,9 @@ class Session:
         with self.lock:
             if not self.redo:
                 raise se.EditError("nothing to redo")
-            text, label = self.redo.pop()
-            self.undo.append((self.text, label))
+            text, label, marker = self.redo.pop()
+            self.undo.append((self.text, label, self.marker))
+            self.marker = marker
             self._commit(text)
             return label
 
@@ -127,7 +137,7 @@ class Session:
             disk = pathlib.Path(self.path).read_text(encoding="utf-8")
             if disk == self.text:
                 return False
-            self.undo.append((self.text, "edit in another editor"))
+            self.undo.append((self.text, "edit in another editor", self.marker))
             self.redo.clear()
             self.text = disk
             self.rebuild()
@@ -155,13 +165,24 @@ class Session:
             text, name, _ = self.candidate(req)
             desc = se.describe(text)
             limit = None
-            if self.marker and desc.get("gui"):
+            if desc.get("gui") and (self.marker or req.get("edit") is not None):
+                # a new step while rolled back: up to it; editing a step: the model as it is at
+                # that step (like Fusion), so later steps don't hide what is being changed
                 names = [f["name"] for f in desc["features"]]
-                limit = names.index(name) + 1 if req.get("edit") is None else self._limit(desc)
+                limit = names.index(name) + 1
             res, sc, ms = self.build(text, limit)
             fr = next((r for r in res.results if r.name == name), None)
             return {"scene": sc, "name": name, "ms": ms, "statement": _statement(text, name),
                     "result": fr.as_dict() if fr else None, "script_error": res.script_error}
+
+    def scene_at(self, name: str) -> dict:
+        """The model as it is right after step `name` (shown while that step is edited)."""
+        with self.lock:
+            names = [f["name"] for f in self.desc.get("features", [])]
+            if name not in names or not self.desc.get("gui"):
+                return {"scene": self.scene}
+            _, sc, ms = self.build(self.text, names.index(name) + 1)
+            return {"scene": sc, "ms": ms}
 
     def statement(self, req: dict) -> dict:
         """The line a tool would write, without building anything."""
@@ -280,35 +301,36 @@ class Session:
             r = next((x for x in res.results if x.name == name), None)
             if r is not None and r.status in ("error", "skipped"):
                 raise se.EditError(r.message or f"{name} could not be built")
-            self.write(text, label)
-            if req.get("edit") is None and self.marker is not None:
-                self.marker = name
-                self.rebuild()
+            new_marker = name if req.get("edit") is None and self.marker is not None else ...
+            self.write(text, label, marker=new_marker)
             return {"name": name}
 
     def delete(self, name: str, mode: str):
         with self.lock:
             if mode == "check":
                 body = next((b for b in self.scene["bodies"] if b["id"] == name), None)
+                plan = se.delete_plan(self.text, name)
                 return {"dependents": se.dependents(self.text, name),
-                        "can_remove": bool(body and body["role"] != "removed")}
+                        "can_remove": bool(body and body["role"] != "removed"),
+                        "detach": {"keeps": plan["keeps"], "also": plan["also"]}}
             if mode == "remove":
                 body = next((b for b in self.scene["bodies"] if b["id"] == name), None)
                 if not body or body["role"] == "removed":
                     raise se.EditError(f"'{name}' is already removed at the end of the timeline")
                 text, n = se.insert_feature(self.text, "remove", {"body": name}, after=self._after())
-                self.write(text, f"remove {name}")
+                self.write(text, f"remove {name}", marker=n if self.marker is not None else ...)
                 return {"name": n}
-            text = se.delete_feature(self.text, name, cascade=(mode == "cascade"))
-            if self.marker is not None:
+            text = se.delete_feature(self.text, name, cascade=(mode == "cascade"), detach=(mode == "detach"))
+            marker = self.marker
+            if marker is not None:
                 # stay rolled back: if the marker's step (or one before it) goes, it moves to
                 # the nearest step before it that is still there
                 names = [f["name"] for f in self.desc.get("features", [])]
                 left = {f["name"] for f in se.describe(text).get("features", [])}
-                if self.marker in names and self.marker not in left:
-                    before = [n for n in names[:names.index(self.marker)] if n in left]
-                    self.marker = before[-1] if before else None
-            self.write(text, f"delete {name}")
+                if marker in names and marker not in left:
+                    before = [n for n in names[:names.index(marker)] if n in left]
+                    marker = before[-1] if before else None
+            self.write(text, f"delete {name}", marker=marker)
             return {}
 
     def exprs(self) -> dict:
@@ -524,6 +546,12 @@ def route(s: Session, p: str, req: dict):
         return s.sketch_source(str(req["name"]))
     if p == "/api/upload":
         return s.upload(str(req.get("name", "")), str(req.get("data", "")))
+    if p == "/api/sketch_edit":
+        from ..sketchedit import EditError as SketchEditError, apply as sketch_apply
+        try:
+            return sketch_apply(str(req.get("op")), req.get("model") or {}, req.get("solved") or {}, req.get("args") or {})
+        except (SketchEditError, KeyError) as e:
+            raise se.EditError(str(e).strip("'")) from None
     if p == "/api/sketch_parse":
         from .sketchsrc import parse_text
         try:
@@ -570,6 +598,8 @@ def route(s: Session, p: str, req: dict):
         return {"label": s.undo_step(), "state": s.state()}
     if p == "/api/redo":
         return {"label": s.redo_step(), "state": s.state()}
+    if p == "/api/scene_at":
+        return s.scene_at(str(req.get("name", "")))
     if p == "/api/marker":
         with s.lock:
             s.marker = req.get("name")

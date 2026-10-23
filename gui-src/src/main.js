@@ -3,7 +3,7 @@ import { $, esc, get, post, q, toast } from "./api.js";
 import { Viewport } from "./viewport.js";
 import { ViewCube } from "./viewcube.js";
 import { Dialog } from "./dialog.js";
-import { Sketcher, SKETCH_DRAW, SKETCH_RULES } from "./sketcher.js";
+import { Sketcher, SKETCH_DRAW, SKETCH_EDITS, SKETCH_RULES } from "./sketcher.js";
 import { SectionView } from "./section.js";
 import { BODY_TOOLS, GROUPS, ICONS, IS_MAC, OPS_MOD, OP_TO_TOOL, TOOLS, VIEW_KEYS, VIEW_MOD, keyLabel, viewKeyLabel } from "./tools.js";
 import { ScriptEditor } from "./editor.js";
@@ -308,6 +308,7 @@ class App {
     }
     document.querySelectorAll("[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === id)));
     this.dialog = new Dialog(this, id, opts);
+    if (opts.edit) this.renderTimeline();          // the marker moves to the step being edited
   }
 
   editFeature(name) {
@@ -721,7 +722,8 @@ class App {
     const ol = $("timeline"); ol.innerHTML = "";
     const res = Object.fromEntries((this.state.scene.timeline || []).map((r) => [r.name, r]));
     const feats = this.state.desc.features;
-    const marker = this.state.marker;
+    // while a step is being edited the model is shown as it is at that step: the marker sits there
+    const marker = this.dialog && this.dialog.edit && feats.some((f) => f.name === this.dialog.edit) ? this.dialog.edit : this.state.marker;
     if (this.pickedStep && !feats.some((f) => f.name === this.pickedStep)) this.pickedStep = null;
     let after = false;
     if (!feats.length) ol.innerHTML = `<li class="end">Your features appear here, in order.</li>`;
@@ -847,12 +849,18 @@ class App {
   }
 
   async deleteFeature(name) {
+    if (this.dialog) this.closeDialog();        // the open tool was built on the old timeline
     let chk;
     try { chk = await post("/api/delete", { name, mode: "check" }); } catch (e) { return toast(e.message, true); }
     const deps = chk.dependents;
     if (!deps.length) { await this.action("/api/delete", { name, mode: "delete" }).catch(() => {}); return toast(`Deleted ${name}`); }
     const r = $("view").getBoundingClientRect();
+    const d = chk.detach || { keeps: [], also: [] };
+    const list = (xs) => (xs.length > 3 ? `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more` : xs.join(", "));
+    const detachLabel = d.keeps.length
+      ? `Delete ${name}, taking it out of ${list(d.keeps)}${d.also.length ? ` (also deletes ${list(d.also)})` : ""}` : null;
     this.contextMenu(`${name} is used by ${deps.join(", ")}`, [
+      detachLabel ? [detachLabel, () => this.action("/api/delete", { name, mode: "detach" }).then(() => toast(`Deleted ${name}`)).catch(() => {})] : undefined,
       chk.can_remove ? ["Remove instead (keeps everything built from it)", () => this.action("/api/delete", { name, mode: "remove" }).then(() => toast(`${name} removed from here on`)).catch(() => {})] : undefined,
       [`Delete ${name} and ${deps.length} dependent${deps.length > 1 ? "s" : ""}`, () => this.action("/api/delete", { name, mode: "cascade" }).then(() => toast(`Deleted ${name} and ${deps.join(", ")}`)).catch(() => {}), true],
       ["Cancel", () => {}],
@@ -920,7 +928,7 @@ class App {
       <div class="help-head"><b>Keyboard shortcuts</b><button id="help-close">Close</button></div>
       <div class="help-cols">
         <section><h2>Operations</h2><table>${rows(ops.map(([, t]) => [keyLabel(t.key) + (t.alt ? ` or ${keyLabel(t.alt)}` : ""), t.label]))}</table></section>
-        <section><h2>In a sketch</h2><table>${rows([...SKETCH_DRAW.map((t) => [t.key.replace("Shift+", "⇧"), t.label]), ["X", "Construction"],
+        <section><h2>In a sketch</h2><table>${rows([...SKETCH_DRAW.map((t) => [t.key.replace("Shift+", "⇧"), t.label]), ...SKETCH_EDITS.map((t) => [t.key.replace("Shift+", "⇧"), t.label + " (the selection)"]), ["X", "Construction"],
           ...SKETCH_RULES.map((r) => [r.key.replace("Shift+", "⇧"), r.label]), ["Delete", "Delete the selection"], ["0-9 while drawing", "Type a size (Tab: next box, Enter: place)"]])}</table></section>
         <section><h2>View</h2><table>${rows(VIEW_KEYS.map(([k, , l]) => [viewKeyLabel(k), l]))}</table>
           <h2>Mouse and trackpad</h2><table>${rows([["Click", "Select a face or edge (double-click: the body)"], ["Drag →", "Box: select what is inside"], ["Drag ←", "Box: select what it touches"],

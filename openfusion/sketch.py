@@ -31,6 +31,12 @@ Curves (a trailing "construction" makes a curve guide-only: solved, never part o
                                      sin cos tan sqrt exp log pi...; a parameter goes in with an
                                      f-string, f"{P.r}*cos(t)"; fixed; its ends are "<name>.start"
                                      / "<name>.end" (closed when they meet)
+    ("gear", centre, module, teeth)  an involute spur gear's outline (teeth outside), tooth 0 along
+                                     X; options in a dict last: {"pressure_angle": 20, "angle": 0,
+                                     "backlash": 0} (backlash: play at the pitch circle, mm)
+    ("ring_gear", centre, module, teeth)  the hole of a ring gear (teeth inside); same options
+    ("rack", p, q, module)           a straight rack along the pitch line p -> q, teeth on the left
+                                     (whole teeth every pi*module; options pressure_angle, backlash)
 Points are (x, y) or an anchor of another body (fixed where it projects onto the plane).
 A curve's points can also be named through it: "top.start", "top.end", "hole.center".
 
@@ -54,10 +60,12 @@ import math
 
 import numpy as np
 
-KINDS = ("line", "arc", "circle", "spline", "project", "ellipse", "parametric")
+KINDS = ("line", "arc", "circle", "spline", "project", "ellipse", "parametric", "gear", "ring_gear", "rack")
+GEAR_OPTIONS = {"pressure_angle", "angle", "backlash"}
 TOL = 1e-9               # mm: a constraint this close is met
 ALIAS = {"line": ("start", "end"), "arc": ("center", "start", "end"), "circle": ("center",),
-         "project": ("start", "end"), "ellipse": ("center",), "parametric": ("start", "end")}
+         "project": ("start", "end"), "ellipse": ("center",), "parametric": ("start", "end"),
+         "gear": ("center",), "ring_gear": ("center",), "rack": ("start", "end")}
 
 
 class SketchError(ValueError):
@@ -124,6 +132,28 @@ class Model:
                 raise SketchError(f"curve {n!r}: ('parametric', \"x(t)\", \"y(t)\", t0, t1) with t1 > t0")
             c = Curve(n, kind, [], construction=construction, fixed=True)
             c.expr, c.span = (rest[0], rest[1]), (float(rest[2]), float(rest[3]))
+            return c
+        if kind in ("gear", "ring_gear", "rack"):
+            opts = {}
+            if rest and isinstance(rest[-1], dict):
+                opts = rest.pop()
+                bad = set(opts) - GEAR_OPTIONS - ({"angle"} if kind != "rack" else set())
+                if bad or (kind == "rack" and "angle" in opts):
+                    raise SketchError(f"curve {n!r}: options are {', '.join(sorted(GEAR_OPTIONS - ({'angle'} if kind == 'rack' else set())))}")
+            if kind == "rack":
+                if len(rest) != 3 or not isinstance(rest[2], (int, float)) or not rest[2] > 0:
+                    raise SketchError(f"curve {n!r}: ('rack', start, end, module) along the pitch line")
+                c = Curve(n, kind, [self.point(rest[0]), self.point(rest[1])], construction=construction)
+                c.module, c.teeth = float(rest[2]), None
+            else:
+                if len(rest) != 3 or not isinstance(rest[1], (int, float)) or not isinstance(rest[2], (int, float)) \
+                        or not rest[1] > 0 or rest[2] != int(rest[2]) or rest[2] < 3:
+                    raise SketchError(f"curve {n!r}: ('{kind}', centre, module, teeth): a module above 0 and 3 or more teeth")
+                c = Curve(n, kind, [self.point(rest[0])], construction=construction)
+                c.module, c.teeth = float(rest[1]), int(rest[2])
+            c.pa = float(opts.get("pressure_angle", 20.0))
+            c.angle = float(opts.get("angle", 0.0))
+            c.backlash = float(opts.get("backlash", 0.0))
             return c
         if kind == "circle":
             if len(rest) != 2 or not isinstance(rest[1], (int, float)) or not rest[1] > 0:
@@ -237,7 +267,7 @@ class Solver:
 
     def ends(self, x, curve):
         c = self.m.curves[curve]
-        if c.kind not in ("line", "project") or len(c.pts) != 2:
+        if c.kind not in ("line", "project", "rack") or len(c.pts) != 2:
             raise SketchError(f"{curve!r} is not a straight line")
         return self.P(x, c.pts[0]), self.P(x, c.pts[1])
 
@@ -333,7 +363,7 @@ def _on(S, args, v):
 
 
 def _centre(S, x, c):
-    return S.P(x, c.pts[0]) if c.kind in ("circle", "arc") else np.asarray(c.centre, float)
+    return S.P(x, c.pts[0]) if c.kind in ("circle", "arc", "gear", "ring_gear", "ellipse") else np.asarray(c.centre, float)
 
 
 def _radius(S, x, c):
@@ -342,7 +372,7 @@ def _radius(S, x, c):
 
 def _line(S, name):
     c = S.m.curve(name)
-    if c.kind == "line" or (c.kind == "project" and getattr(c, "shape_kind", None) == "line"):
+    if c.kind in ("line", "rack") or (c.kind == "project" and getattr(c, "shape_kind", None) == "line"):
         return c
     raise SketchError(f"{name!r} is not a straight line")
 
@@ -432,8 +462,9 @@ def _equal(S, args, v):
 def _concentric(S, args, v):
     _args("concentric", args, 2, "two arcs/circles")
     c1, c2 = (S.m.curve(a) for a in args)
-    if not all(c.kind in ("circle", "arc") or (c.kind == "project" and c.shape_kind in ("circle", "arc")) for c in (c1, c2)):
-        raise SketchError("concentric: two arcs/circles")
+    if not all(c.kind in ("circle", "arc", "gear", "ring_gear", "ellipse") or (c.kind == "project" and c.shape_kind in ("circle", "arc"))
+               for c in (c1, c2)):
+        raise SketchError("concentric: two arcs/circles (or gears, ellipses)")
     return [lambda x: _centre(S, x, c1) - _centre(S, x, c2)]
 
 
@@ -611,6 +642,26 @@ def build(model: Model, fr):
                 ca, sa = math.cos(math.radians(c.angle)), math.sin(math.radians(c.angle))
                 c.samples = [[ctr[0] + c.rx * math.cos(t) * ca - c.ry * math.sin(t) * sa,
                               ctr[1] + c.rx * math.cos(t) * sa + c.ry * math.sin(t) * ca] for t in ts]
+            elif c.kind in ("gear", "ring_gear", "rack"):
+                from . import gears
+                try:
+                    if c.kind == "rack":
+                        p0, p1 = np.asarray(pt(c.pts[0]), float), np.asarray(pt(c.pts[1]), float)
+                        L = _norm(p1 - p0)
+                        u = (p1 - p0) / (L or 1.0)
+                        nrm = np.array([-u[1], u[0]])
+                        segs = gears.rack(c.module, L, c.pa, c.backlash)
+                        loc = lambda x, y, p0=p0, u=u, nrm=nrm: p0 + x * u + y * nrm                 # noqa: E731
+                    else:
+                        segs = (gears.spur if c.kind == "gear" else gears.ring)(c.module, c.teeth, c.pa, c.backlash, c.angle)
+                        ctr = np.asarray(pt(c.pts[0]), float)
+                        loc = lambda x, y, ctr=ctr: ctr + np.array([x, y])                          # noqa: E731
+                except ValueError as err:
+                    raise SketchError(f"curve {c.name!r}: {err}")
+                for e in gears.edges(segs, lambda x, y, loc=loc: w(loc(x, y))):
+                    edges.append((e, c.name, c.construction))
+                c.samples = [list(map(float, loc(x, y))) for x, y in gears.sample(segs)]
+                continue
             else:                     # spline, or a projected free-form edge
                 from OCP.GeomAPI import GeomAPI_Interpolate
                 from OCP.collections import HArray1_gp_Pnt

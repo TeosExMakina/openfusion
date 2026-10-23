@@ -403,16 +403,48 @@ class CoilDesign(Design):
         return dict(params)
 
 
-def make_coil(fid, frame, role, R, turns, pitch, size, section="circle", hand="right"):
+# Thread profiles for coil(section=...): (crest half-width, depth, flank angle up, flank angle down)
+# for a profile of size P (normally the pitch), angles from the radial direction in degrees.
+THREAD_PROFILES = {
+    "iso": (1 / 16, 0.5413, 30.0, 30.0),            # ISO metric / unified 60 degree V (basic, 5/8 H deep)
+    "acme": (0.3707 / 2, 0.5, 14.5, 14.5),          # Acme 29 degree, half the pitch deep
+    "trapezoidal": (0.366 / 2, 0.5, 15.0, 15.0),    # metric trapezoidal (Tr) 30 degree
+    "buttress": (0.05, 0.6, 7.0, 45.0),             # 7/45 buttress: the steep flank faces +Z (takes the load)
+}
+SECTIONS = ("circle", "square") + tuple(THREAD_PROFILES)
+
+
+def thread_section(name, P):
+    """A thread profile's outline in (radial, axial) coordinates, base at 0, crest at +depth, with
+    a little extra below the base (2% of P) so it joins into the cylinder it sits on."""
+    c, h, up, down = THREAD_PROFILES[name]
+    c, h, e = c * P, h * P, 0.02 * P
+    tu, td = math.tan(math.radians(up)), math.tan(math.radians(down))
+    return [(-e, c + (h + e) * tu), (h, c), (h, -c), (-e, -c - (h + e) * td)]
+
+
+def make_coil(fid, frame, role, R, turns, pitch, size, section="circle", hand="right", side="outside"):
     _check_positive(R=R, turns=turns, pitch=pitch, size=size)
-    if section not in ("circle", "square"):
-        raise ValueError("section must be 'circle' or 'square'")
+    if section not in SECTIONS:
+        raise ValueError(f"section must be one of {', '.join(SECTIONS)}")
     if hand not in ("right", "left"):
         raise ValueError("hand must be 'right' or 'left'")
-    if pitch <= size * 1.0001:
-        raise ValueError(f"pitch ({pitch}) must be larger than section size ({size}) or the coil self-intersects")
-    if size / 2 >= R:
-        raise ValueError(f"section size ({size}) must be smaller than 2*R ({2 * R})")
+    if side not in ("outside", "inside"):
+        raise ValueError("side must be 'outside' (a thread on a shaft) or 'inside' (in a hole)")
+    if section in THREAD_PROFILES:
+        prof2d = thread_section(section, size)
+        width = max(z for _, z in prof2d) - min(z for _, z in prof2d)
+        depth = max(r for r, _ in prof2d)
+        if pitch <= width * 1.0001:
+            raise ValueError(f"a {section} thread of size {size:g} is {width:.3f} wide at its base: the pitch must be more "
+                             f"(usually size = pitch)")
+        if side == "inside" and depth >= R:
+            raise ValueError(f"the thread ({depth:.3f} deep) doesn't fit inside radius {R}")
+    else:
+        if pitch <= size * 1.0001:
+            raise ValueError(f"pitch ({pitch}) must be larger than section size ({size}) or the coil self-intersects")
+        if size / 2 >= R:
+            raise ValueError(f"section size ({size}) must be smaller than 2*R ({2 * R})")
     design = CoilDesign(R, turns, pitch, hand)
     surf = Geom_CylindricalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), float(R))
     s = design.s
@@ -426,6 +458,14 @@ def make_coil(fid, frame, role, R, turns, pitch, size, section="circle", hand="r
     if section == "circle":
         circ = gp_Circ(gp_ax2(p0, d0, radial0), size / 2)
         prof = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(circ).Edge()).Wire()
+    elif section in THREAD_PROFILES:
+        # in the plane through the axis, so the thread has its true shape measured along the axis
+        sgn = 1.0 if side == "outside" else -1.0
+        poly = BRepBuilderAPI_MakePolygon()
+        for dr, dz in prof2d:
+            poly.Add(gp_Pnt(*(p0 + sgn * dr * radial0 + dz * np.array([0.0, 0.0, 1.0]))))
+        poly.Close()
+        prof = poly.Wire()
     else:
         up = unit(np.cross(d0, radial0))
         h = size / 2
@@ -448,9 +488,9 @@ def make_coil(fid, frame, role, R, turns, pitch, size, section="circle", hand="r
     names = []
     for f in topo.faces(shape):
         area, cen = topo.face_area_centroid(f)
-        if topo.surface_kind(f) == "plane" and np.linalg.norm(cen - p0) < size:
+        if topo.surface_kind(f) == "plane" and np.linalg.norm(cen - p0) < size and _is_cap(f, cen, p0):
             names.append((f, FaceName(fid, "start")))
-        elif topo.surface_kind(f) == "plane" and np.linalg.norm(cen - pe) < size:
+        elif topo.surface_kind(f) == "plane" and np.linalg.norm(cen - pe) < size and _is_cap(f, cen, pe):
             names.append((f, FaceName(fid, "end")))
         elif section == "circle":
             names.append((f, FaceName(fid, "surface")))
@@ -460,11 +500,122 @@ def make_coil(fid, frame, role, R, turns, pitch, size, section="circle", hand="r
             dr, dz = float(nrm @ radial), float(nrm[2])
             label = ("outer" if dr > 0 else "inner") if abs(dr) >= abs(dz) else ("top" if dz > 0 else "bottom")
             names.append((f, FaceName(fid, label)))
-    return _finish(fid, shape, names, design, "coil", frame, role,
-                   dict(R=R, turns=turns, pitch=pitch, size=size, section=section, hand=hand))
+    params = dict(R=R, turns=turns, pitch=pitch, size=size, section=section, hand=hand)
+    if side != "outside":
+        params["side"] = side
+    return _finish(fid, shape, names, design, "coil", frame, role, params)
+
+
+def _is_cap(f, cen, p):
+    """An end cap of a coil: a flat face through the end point, square-ish to the helix (not a
+    flat flank of a thread profile, which also lies near the ends)."""
+    n = topo.plane_normal(f)
+    radial = np.array([p[0], p[1], 0.0])
+    radial = radial / (np.linalg.norm(radial) or 1.0)
+    return abs(float(n @ radial)) < 0.5 and abs(float(n[2])) < 0.9
+
+
+# ===================================================================== gears
+class GearDesign(Design):
+    """A gear on its axis Z from z=0 to its thickness: anchors at the middle of each end."""
+    kind = "gear"
+
+    def __init__(self, thickness, pitch_r):
+        self.t, self.pitch_r = float(thickness), float(pitch_r)
+
+    def names(self):
+        return ["origin", "center", "+Z", "-Z", "pitch"]
+
+    def get(self, name, params):
+        if name == "origin":
+            return Frame.world()
+        if name == "center":
+            return Frame.make((0, 0, self.t / 2))
+        if name == "+Z":
+            return Frame.make((0, 0, self.t), (1, 0, 0), (0, 0, 1))
+        if name == "-Z":
+            return Frame.make((0, 0, 0), (1, 0, 0), (0, 0, -1))
+        if name == "pitch":                  # on the pitch circle, at tooth 0, mid-thickness
+            return Frame.make((self.pitch_r, 0, self.t / 2), (0, 1, 0), (1, 0, 0))
+        raise NameError_(f"gear has no anchor '{name}'")
+
+
+def make_gear(fid, frame, role, module, teeth, thickness, pressure_angle=20.0, backlash=0.0, bore=0.0,
+              helix=0.0, herringbone=False, internal=False, rim=None):
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
+    from . import gears
+    _check_positive(module=module, thickness=thickness)
+    if not (-45 < helix < 45):
+        raise ValueError("helix angle must be between -45 and 45 degrees")
+    r = module * teeth / 2
+    profile = gears.ring if internal else gears.spur
+    profile(module, teeth, pressure_angle, backlash)                         # checks the numbers
+    # a helical gear: the teeth turn by thickness * tan(helix) / r radians from bottom to top
+    twist = thickness * math.tan(math.radians(helix)) / r if helix else 0.0
+    n = 2 if not twist else max(3, int(abs(math.degrees(twist)) / 6) + 2)
+    levels = [(thickness * k / (n - 1), twist * k / (n - 1)) for k in range(n)]
+    if herringbone and twist:
+        half = [(thickness / 2 * k / (n - 1), twist / 2 * k / (n - 1)) for k in range(n)]
+        levels = half + [(thickness - h, a) for h, a in reversed(half[:-1])]
+    ts = BRepOffsetAPI_ThruSections(True, len(levels) == 2, 1e-6)
+    for h, a in levels:
+        segs = profile(module, teeth, pressure_angle, backlash, math.degrees(a))
+        ts.AddWire(gears.wire(segs, lambda x, y, h=h: np.array([x, y, h])))
+    ts.CheckCompatibility(False)
+    ts.Build()
+    if not ts.IsDone():
+        raise RuntimeError("could not build the gear")
+    teeth_solid = ts.Shape()
+    if internal:
+        outer = rim if rim is not None else 2 * (r + 1.25 * module) + 8 * module
+        if outer / 2 <= r + 1.25 * module + 1e-6:
+            raise ValueError(f"rim diameter must be more than the tooth roots' {2 * (r + 1.25 * module):.2f} mm")
+        cyl = BRepPrimAPI_MakeCylinder(gp_ax2(), outer / 2, thickness).Shape()
+        shape = BRepAlgoAPI_Cut(cyl, teeth_solid).Shape()
+    else:
+        shape = teeth_solid
+        if bore:
+            if not (0 < bore / 2 < r - 1.25 * module):
+                raise ValueError(f"bore must be smaller than the root diameter ({2 * (r - 1.25 * module):.2f} mm)")
+            hole = BRepPrimAPI_MakeCylinder(gp_ax2((0, 0, -1)), bore / 2, thickness + 2).Shape()
+            shape = BRepAlgoAPI_Cut(shape, hole).Shape()
+    sols = topo.solids(shape)
+    if len(sols) != 1:
+        raise RuntimeError("the gear did not come out as one solid")
+    shape = sols[0]
+    # ends +Z / -Z, the bore (a gear) or the rim (a ring gear), and the teeth, numbered round from X
+    outer_r = ((rim if rim is not None else 2 * (r + 1.25 * module) + 8 * module) / 2) if internal else None
+    names = []
+    for f in topo.faces(shape):
+        kind = topo.surface_kind(f)
+        c = topo.face_area_centroid(f)[1]
+        if kind == "plane" and abs(abs(topo.plane_normal(f)[2]) - 1) < 1e-6:
+            names.append((f, FaceName(fid, "+Z" if c[2] > thickness / 2 else "-Z")))
+            continue
+        name = "teeth"
+        if kind == "cylinder":
+            p = topo.face_point_normal_mid(f)[0]
+            rho = math.hypot(p[0], p[1])
+            if bore and not internal and abs(rho - bore / 2) < 1e-6:
+                name = "bore"
+            elif internal and abs(rho - outer_r) < 1e-6:
+                name = "rim"
+        names.append((f, FaceName(fid, name)))
+    tooth = [(f, nm) for f, nm in names if nm.name == "teeth"]
+    others = [(f, nm) for f, nm in names if nm.name != "teeth"]
+    def ang(f):
+        c = topo.face_area_centroid(f)[1]
+        return (round(math.atan2(c[1], c[0]) % (2 * math.pi), 6), round(float(math.hypot(c[0], c[1])), 6))
+    tooth.sort(key=lambda x: ang(x[0]))
+    names = others + [(f, FaceName(fid, "teeth", k)) for k, (f, _) in enumerate(tooth)]
+    params = dict(module=module, teeth=teeth, thickness=thickness, pressure_angle=pressure_angle)
+    if helix:
+        params["helix"] = helix
+    return _finish(fid, shape, names, GearDesign(thickness, r), "gear", frame, role, params)
 
 
 BUILDERS = {
     "box": make_box, "cylinder": make_cylinder, "cone": make_cone, "sphere": make_sphere,
-    "torus": make_torus, "polygon": make_polygon, "coil": make_coil,
+    "torus": make_torus, "polygon": make_polygon, "coil": make_coil, "gear": make_gear,
 }

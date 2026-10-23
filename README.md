@@ -1,9 +1,5 @@
 # OpenFusion
 
-
-
-![Screenshot 2026-10-23 at 3.59.17 AM.jpg](../../../../Desktop/Screenshot%202026-10-23%20at%203.59.17%E2%80%AFAM.jpg)
-
 Parametric solid modeling for 3D printing where every face, edge and anchor has a
 stable name, so changing a parameter and rebuilding never quietly breaks your part.
 
@@ -39,7 +35,6 @@ from a Python that is too old: delete `.venv` and recreate it as above.
 No Node.js is needed: the app's frontend ships prebuilt in `openfusion/gui/static/`.
 
 
-
 ## Building for Linux (Bash)
 
 ```bash
@@ -64,11 +59,8 @@ python -m pytest
 openfusion app
 ```
 
-
-
-
-
 ## Quick start
+
 
 ```bash
 openfusion new bracket.ofs           # starter script
@@ -109,6 +101,17 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
   `sketch(...)` statement; double-click it in the timeline to edit it again. Push/Pull, Revolve,
   Loft and Sweep take the sketch (its outline with holes) or one region of it; Sweep also takes its
   curves one by one as a path.
+  - **Editing tools.** **⇧T Trim**: click the piece of a line, arc or circle to take out; it is cut
+    where other curves cross it and the new ends stay on them. **⇧F Fillet**: click a corner where
+    two lines meet and type the radius; the corner becomes a tangent arc (a length measured to the
+    corner keeps measuring to it). Then, on the selected curves: **⇧O Offset** (type the distance;
+    outward, or negative for inside; a chain stays joined and the copy is held at that distance),
+    **⇧M Mirror** (click the mirror line, or select it last; every new point is held symmetric),
+    **⇧R Pattern** (rows and columns, held at the spacings) and **⇧Q Circular** (click the centre,
+    type how many). Each is one undo step.
+  - **G Gear**: click the centre, then out to about the size you want; type the module and the
+    teeth (Tab between them), Enter places it. A gear's outline is a real involute profile (see
+    Gears below); the inspector edits its module and teeth.
   - **Type sizes while you draw.** After the first click, boxes by the cursor show the shape's size
     live (a line's length and angle, a rectangle's width and height, a circle's diameter, an ellipse's
     half-widths, an arc's radius and sweep). Just type a number (or `P.width`): it goes into the first
@@ -122,6 +125,13 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
     Hover a row to light it up, click to select it, × to delete; dimension values can be edited right
     in the list. The **Text** tab is the whole sketch as `points=… curves=… constraints=…`: edit any
     line (add an ellipse or a parametric curve by hand, say) and Apply (⌘Enter).
+- **Gear** (⌃⇧G, under CREATE ▾): an involute spur gear on a face or anchor: module, teeth, thickness,
+  bore, pressure angle, backlash; a helix angle makes it helical (herringbone turns it back halfway);
+  Kind: Ring gear puts the teeth inside a rim. See Gears below for meshing them.
+- **Coil** (⌃⇧H): a wire helix (round or square), or a **thread**: pick ISO 60° V, Acme 29°,
+  trapezoidal (Tr) 30° or buttress 7°/45°; Size is the thread's pitch (usually the same as Pitch), and
+  it stands on the cylinder of the coil's radius, outside (join it to a shaft) or inside (to a nut's
+  hole). For ordinary metric screws and nuts, Hole's *tapped* fit and Thread are simpler.
 - **Hole** (⌃H) and **Thread** (⌃⇧T, in MODIFY ▾). Click a point on a face for a hole; type a screw size (M3)
   and pick the fit: clearance (close, normal, loose), tap drill, or **tapped** for a real, printable ISO thread.
   Counterbore and countersink sizes come from the screw size too. Thread: click a shaft or a hole's wall.
@@ -160,9 +170,11 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
 - **Tab** moves through every field of a tool, including Angle 0 and Role, and wraps around.
   Over the view, Tab cycles snap points.
 - **Points anywhere.** When a tool wants a point, click anywhere on a face: the point is kept as an
-  offset from that face's anchor, e.g. `plate.anchor("+Z").offset(x=12.5, y=-3)`. It snaps to a
-  quarter of the visible grid (1 mm on a 5 mm grid; the status bar shows both). Orange dots are
-  snap points (center, hole and boss centers, corners, midpoints); within 16 px of one, it wins.
+  offset from the face's feature nearest the cursor (a corner, the centre, a hole...), e.g.
+  `plate.face("+Z").corner(2).offset(x=5, y=-3)`, and the face's grid moves to start at that
+  feature, so the grid lines near a corner run exactly through it whatever the face's shape. It
+  snaps to the visible grid. Orange dots are snap points (every corner, edge middle, arc centre,
+  hole and boss centre, and the centre); within 16 px of one, it wins.
   Pointing into a hole offers the hole's center. Empty space picks a point on the bed. Turn on
   **Anchors** to click any body's anchor triads.
 - **Building primitives, Fusion style.** Click the face (or anchor) to build on: the grid turns
@@ -197,8 +209,12 @@ in a field updates the ghost. The arrows only change the dialog's numbers; one s
   **marker** after the last step can be dragged back to roll the model back to any step (new steps
   go in there) and forward again; right-click a step for Go to the end too. Right-click a step to rename (every use in the
   script follows), roll back to it, show it in the script, view its attributes, or delete it.
-  Deleting something other steps depend on offers **Remove instead**, which keeps everything built
-  from it.
+  **Editing a step** (double-click it) shows the model as it was at that step, with the later steps
+  greyed, like Fusion; OK rebuilds everything after it. **Deleting a step** other steps use offers:
+  *take it out of* the steps that only list it (a cut's tools: `tools=[a, b]` becomes `tools=[b]`;
+  steps that can't do without it, like a move of it, go too), **Remove instead** (keeps everything
+  built from it), or delete it with everything that depends on it. Undo and redo put the marker back
+  where it was with each change.
 - **Opacity.** Right-click a body (in the list or the view) and drag the Opacity slider to see
   through it, handy for checking a shell's inner walls. It is remembered per part on this computer
   and never changes the script.
@@ -334,8 +350,10 @@ tool's name (`plate.face("post.side")`); fillet and chamfer faces are named afte
 `plate.face("+Z")` still returns every piece.
 
 **Points on a face**: `face.hole(i)` and `face.boss(i)` (centers of round holes and round
-features standing on the face) always exist. `face.corner(i)`, `face.mid(i)` and `face.arc(i)`
-exist when the face is simple: flat, at most 12 edges, all lines or arcs. Corners run
+features standing on the face) always exist. Every flat face also has `face.corner(i)` (the
+corners of its outline, notches and cut-outs included), `face.mid(i)` (the middle of each outline
+edge), `face.arc(i)` (the centre of each round edge) and `face.inner(i)` (the corners of openings
+that aren't round, like a square hole or a slot), however odd its shape. Corners run
 counterclockwise from the one nearest angle 0.
 
 **Design anchors vs topology anchors.** `plate.anchor("+Z")` is computed from the box's
@@ -411,7 +429,8 @@ lug = extrude(s, 5)                    # the outline with its hole; or s.face("h
   `sqrt`, `exp`, `log`, `pi`, `abs`, `atan2`, `**`; closed if it ends where it starts; parameters go
   in with an f-string, `f"{P.a} * cos(t)"`),
   `("spline", p1, p2, ..., ["closed"])`, `("project", body.edge(...))` (a fixed copy of an edge, its
-  ends usable as `name.start` / `name.end`). Add `"construction"` at the end for a guide. Any curve's
+  ends usable as `name.start` / `name.end`), `("gear", centre, module, teeth)`, `("ring_gear", ...)`
+  and `("rack", p, q, module)` (see Gears). Add `"construction"` at the end for a guide. Any curve's
   ends and centre are points too: `"bottom.start"`, `"hole.center"`.
 - **Constraints**: `coincident`, `on` (point on curve), `midpoint`, `horizontal`, `vertical`
   (a line or two points), `parallel`, `perpendicular`, `collinear`, `tangent`, `equal`, `concentric`,
@@ -427,6 +446,31 @@ lug = extrude(s, 5)                    # the outline with its hole; or s.face("h
 - **Curves are edges.** `s.edge("bottom")` is that curve; a list of open curves is a path for
   `sweep(profile, path=[s.edge("a1"), s.edge("l2")])` (or the whole sketch, if it is one open chain). Extruding a sketch drawn on a body's face
   joins into (or with `op="cut"` cuts) that body, and the side faces are named `side(<curve>)`.
+
+## Gears
+
+```python
+a = gear(module=2, teeth=20, thickness=8, bore=5)
+b = gear(module=2, teeth=11, thickness=8, at=world.point(31, 0, 0))          # 2 * (20 + 11) / 2 = 31 apart
+h = gear(module=1.5, teeth=24, thickness=10, helix=20)                       # helical; mesh with helix=-20
+ring = gear(module=2, teeth=40, thickness=6, internal=True, rim=100)         # teeth inside
+s = sketch(points={"o": (0, 0), "p": (-20, -30), "q": (20, -30)},
+           curves={"g": ("gear", "o", 2, 20), "r": ("rack", "p", "q", 2),     # in a sketch, to extrude
+                   "rg": ("ring_gear", "o", 2, 40, {"backlash": 0.1})})
+```
+
+- Involute teeth, 20° pressure angle unless you say otherwise (14.5 and 25 are the other common
+  ones), addendum one module, dedendum 1.25 modules. **Two gears mesh** with the same module and
+  pressure angle, their centres `module * (teeth1 + teeth2) / 2` apart (`module * (ring - gear) / 2`
+  inside a ring gear). Tooth 0 points along X: a gear placed on another's X axis meshes as it is
+  when its teeth are odd; with even teeth turn it by `180 / teeth` degrees (`spin=` for gear(),
+  `"angle"` in a sketch). Inside a ring gear (whose tooth space 0 is on X), no turn is needed.
+- **backlash** (mm at the pitch circle) thins the teeth (widens a ring gear's spaces) for play; 0.1
+  to 0.2 mm on each gear suits most printers.
+- Faces: `+Z`, `-Z`, `teeth#k` (round from X), `bore`, `rim`. Anchors: `+Z`, `-Z`, `center`, and
+  `pitch` (on the pitch circle at tooth 0).
+- In a sketch: `("gear", centre, module, teeth)`, `("ring_gear", ...)`, and `("rack", p, q, module)`
+  (teeth on the left of p → q, one every π·module); options go in a dict last.
 
 ## Importing parts
 
@@ -501,7 +545,7 @@ start, which made macOS ask for Local Network access; since 0.8.2 they don't, so
 
 ## What is not built yet
 
-Sketch fillets/trims, offsets and patterns inside a sketch, inch (UNC/UNF) threads, rib, web,
+Sketch extend and break, inch (UNC/UNF) threads, rib, web,
 components. Imported meshes keep their curved areas as facets (cylinders and holes are not yet
 recognised and rebuilt as true round faces). In the app, a new
 step is always inserted as a whole statement; reordering steps by drag and drop is not there yet

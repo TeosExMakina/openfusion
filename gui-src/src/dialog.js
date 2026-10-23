@@ -42,6 +42,13 @@ export class Dialog {
     Object.assign(this.values, preset);
     for (const [k, v] of Object.entries(preset)) if (this.isMulti(k)) this.items[k] = splitList(v);
     this.render();
+    if (edit && toolId !== "move" && toolId !== "move_p2p") {
+      // editing a step shows the model as it is at that step, like Fusion's timeline does
+      post("/api/scene_at", { name: edit }).then((r) => {
+        if (this.app.dialog !== this || this.livePreviewShown) return;
+        this.baseScene = r.scene; this.vp.setScene(r.scene);
+      }).catch(() => {});
+    }
     if (this.tool.size) this.ghost = new Ghost(this.vp, (k, v) => this.onArrow(k, v));
     const firstEmpty = (this.tool.fields || []).find((f) => SLOT_KINDS.has(f.kind) && !f.hidden && !f.noAuto && !f.planes && !this.text(f.key));
     this.activate(firstEmpty ? firstEmpty.key : null);
@@ -1070,6 +1077,7 @@ export class Dialog {
       $("dlg-ok").disabled = !!pv.script_error || (r && (r.status === "error" || r.status === "skipped"));
       if (this.dragging) return;
       const touched = pv.scene.bodies.filter((b) => b.history.includes(pv.name)).map((b) => b.id);
+      this.livePreviewShown = true;
       this.vp.setScene(pv.scene, { focus: touched });
       if (this.gizmo) this.gizmo.show(this.moveGeometry()?.frame || WORLD_FRAME);
       this.app.previewTimeline(pv.name, r);
