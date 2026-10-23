@@ -148,3 +148,47 @@ def test_new_bodies_are_named_body_n_and_other_steps_after_their_operation():
     text, n2 = insert_feature(text, "cylinder", {"r": "1", "h": "1"})
     text, n3 = insert_feature(text, "fillet", {"edges": "body1.edges()", "r": "0.1"})
     assert (n1, n2, n3) == ("body1", "body2", "fillet1")
+
+
+REUSED = '''from openfusion import *
+plate = box(length=40, width=30, height=10)
+lug = extrude(plate.face("+Z"), 5)
+cut1 = extrude(plate.face("lug.end"), -2, op="cut")
+post = cylinder(r=3, h=8, at=world.point(60, 0, 0))
+lug = extrude(post.face("+Z"), 2)
+'''
+
+
+def test_a_reused_variable_names_steps_the_way_the_engine_does():
+    """Python keeps only a variable's last value: the earlier step gets an automatic name, in
+    the app exactly as in the engine (they used to disagree, which broke the timeline)."""
+    d = describe(REUSED)
+    names = [f["name"] for f in d["features"]]
+    assert names == ["plate", "extrude1", "cut1", "post", "lug"]
+    r = Engine().run_source(REUSED)
+    assert [x.name for x in r.results] == names
+    assert d["shadowed"] == [{"name": names[1], "variable": "lug", "line": 3, "again": 6}]
+    assert d["features"][1]["variable"] == "lug" and not d["features"][1]["assigned"]
+    # deleting or editing the earlier step touches that statement, not the later one
+    first = names[1]
+    assert "extrude(plate.face(\"+Z\"), 5)" not in delete_feature(REUSED, first, cascade=True)
+    assert "post.face" in delete_feature(REUSED, first, cascade=True)
+
+
+def test_fix_names_gives_each_step_its_own_name_and_keeps_what_was_meant():
+    from openfusion.scriptedit import fix_names, shadowed_steps
+    fixed = fix_names(REUSED)
+    assert not shadowed_steps(fixed)
+    first = describe(REUSED)["features"][1]["name"]
+    assert f'{first} = extrude(plate.face("+Z"), 5)' in fixed
+    # "lug.end" was written while lug meant the first extrude: it follows it
+    assert f'plate.face("{first}.end")' in fixed and 'lug = extrude(post.face("+Z"), 2)' in fixed
+    r = Engine().run_source(fixed)
+    assert all(x.status == "ok" for x in r.results), r.report()
+    assert fix_names(fixed) == fixed
+
+
+def test_dependents_include_face_names_in_strings():
+    src = ('from openfusion import *\nplate = box(length=40, width=30, height=10)\n'
+           'lug = extrude(plate.face("+Z"), 5)\nf = fillet(plate, edges=[plate.edge("lug.end|lug.side(+X+Z)")], r=1)\n')
+    assert dependents(src, "lug") == ["f"]

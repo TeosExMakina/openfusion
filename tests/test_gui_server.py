@@ -1,6 +1,7 @@
 """GUI session: every action is one script edit, undoable, and rebuilt."""
 import json
 import pathlib
+import re
 import threading
 import time
 import urllib.request
@@ -339,3 +340,90 @@ def test_sketch_args_parse_the_written_statement():
     for bad in ({"points": "make_points()"}, {"constraints": "rules"}):
         with pytest.raises(ValueError):
             sketch_args(bad)
+
+
+def test_reused_names_are_fixed_in_one_step(tmp_path):
+    from test_scriptedit import REUSED
+    f = tmp_path / "reused.ofs"
+    f.write_text(REUSED)
+    s = Session(str(f))
+    st = s.state()
+    assert st["desc"]["shadowed"] and [r["name"] for r in st["scene"]["timeline"]] == [x["name"] for x in st["desc"]["features"]]
+    out = route(s, "/api/fix_names", {})
+    assert not out["state"]["desc"]["shadowed"] and "extrude1 = extrude(" in f.read_text()
+    assert all(r["status"] == "ok" for r in out["state"]["scene"]["timeline"])
+    assert out["state"]["undo"] == "give reused names their own"
+
+
+def test_an_unexpected_error_answers_in_json_and_rebuilds_from_scratch(sess, monkeypatch):
+    """Anything that isn't the script's fault used to drop the connection, which the app
+    showed as "Load failed". Now it's a message, and the model is rebuilt from zero."""
+    from http.server import ThreadingHTTPServer
+    import openfusion.gui.server as server
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(sess))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    old_engine = sess.engine
+
+    def boom(*a, **k):
+        raise IndexError("something inside broke")
+    monkeypatch.setattr(sess, "preview", boom)
+    try:
+        req = urllib.request.Request(base + "/api/preview", data=b'{"op": "box", "args": {}}', method="POST")
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req)
+        assert e.value.code == 500
+        body = json.loads(e.value.read())
+        assert body["internal"] and "IndexError: something inside broke" in body["error"] and "rebuilt" in body["error"]
+        assert sess.engine is not old_engine and sess.scene is not None
+        # the state route answers the same way if it fails
+        monkeypatch.setattr(server.Session, "state", boom)
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(base + "/api/state")
+        assert e.value.code == 500 and json.loads(e.value.read())["internal"]
+    finally:
+        srv.shutdown()
+    assert server.internal_error(None, "/api/x", ValueError("v"))["error"].endswith("goes back to the last version.")
+
+
+def test_deleting_the_step_the_marker_is_on_stays_rolled_back(sess):
+    for _ in range(3):
+        route(sess, "/api/apply", {"op": "box", "args": {"length": "2", "width": "2", "height": "2"}})
+    route(sess, "/api/marker", {"name": "body2"})
+    out = route(sess, "/api/delete", {"name": "body2", "mode": "delete"})
+    assert out["state"]["marker"] == "body1"
+    route(sess, "/api/delete", {"name": "body3", "mode": "delete"})          # after the marker: no change
+    assert sess.marker == "body1"
+
+
+def test_the_server_never_looks_up_host_names(monkeypatch):
+    """http.server looks up the computer's name when it starts; on a Mac that can go out on the
+    local network and make macOS ask for Local Network access. Ours skips it."""
+    import socket
+    from openfusion.gui.server import make_server
+
+    def no(*a, **k):
+        raise AssertionError("looked up a host name")
+    monkeypatch.setattr(socket, "getfqdn", no)
+    monkeypatch.setattr(socket, "gethostbyaddr", no)
+    srv, _ = make_server(str(pathlib.Path(__file__).parent.parent / "examples" / "plate_post.ofs"), 0)
+    try:
+        assert srv.server_name == "localhost" and srv.server_address[0] == "127.0.0.1"
+    finally:
+        srv.server_close()
+
+
+def test_sketch_text_is_read_back_for_the_sketch_panel():
+    from openfusion.gui.sketchsrc import parse_text
+    src = parse_text('points={"a": (0, 0), "b": (10, -2), "c": plate.anchor("+Z")},\n'
+                     'curves={"l1": ("line", "a", "b"), "e": ("ellipse", "a", 4, P.r)},\nconstraints=[("length", "l1", 10)]')
+    assert src["points"]["b"] == [10, -2] and src["points"]["c"] == {"expr": 'plate.anchor("+Z")'}
+    assert src["curves"]["e"] == ["ellipse", "a", 4, {"expr": "P.r"}]
+    assert src["constraints"] == [["length", "l1", 10]]
+    s = Session.__new__(Session)                   # the route needs no part
+    assert route(s, "/api/sketch_parse", {"text": 'points={"a": (1, 2)}'})["points"] == {"a": [1, 2]}
+    with pytest.raises(se.EditError, match="doesn't read"):
+        route(s, "/api/sketch_parse", {"text": "points=("})
+    for bad, msg in (("points={", "doesn't read"), ("at=1", "not at"), ("{}", "points=..."), ('curves={"x": 3}', "(kind, ...)")):
+        with pytest.raises(ValueError, match=re.escape(msg)):
+            parse_text(bad)

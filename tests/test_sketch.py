@@ -203,3 +203,60 @@ def test_mistakes_are_explained(points, curves, cons, msg):
     with pytest.raises(SketchError, match=msg.replace("(", r"\(").replace(")", r"\)")):
         m = Model(points, curves, cons)
         solve(m)
+
+
+def run(src):
+    return Engine().run_source("from openfusion import *\n" + src)
+
+
+def test_ellipses_and_parametric_curves():
+    import math
+    r = run('s = sketch(points={"o": (0, 0)}, curves={"el": ("ellipse", "o", 20, 10, 30)})\nplate = extrude(s, 2)\n'
+            'w = sketch(at=world.point(0, 50, 0), curves={"heart": ("parametric", "16*sin(t)**3", '
+            '"13*cos(t) - 5*cos(2*t) - 2*cos(3*t) - cos(4*t)", 0, 2*pi)})\nh = extrude(w, 1)\n'
+            'line = sketch(at=world.point(0, 100, 0), points={"a": (30, 5)}, curves={"wave": ("parametric", "t", "3*sin(t)", 0, 10), '
+            '"tail": ("line", "wave.end", "a")})\n'
+            f'big = sketch(curves={{"c": ("parametric", f"{{2*5}}*cos(t)", "10*sin(t)", 0, 2*pi)}}, at=world.point(0, -50, 0))\n'
+            'b = extrude(big, 1)\n'.replace("2*pi", str(2 * math.pi)))
+    assert all(x.status == "ok" for x in r.results), r.report()
+    assert topo.volume(r.bodies["plate"].shape) == pytest.approx(math.pi * 20 * 10 * 2, rel=1e-3)
+    assert topo.volume(r.bodies["b"].shape) == pytest.approx(math.pi * 100, rel=1e-3)
+    info = next(x for x in r.results if x.name == "line").info["sketch"]
+    assert info["curves"]["wave"]["pts"] == ["wave.start", "wave.end"] and len(info["curves"]["wave"]["samples"]) == 201
+    assert info["points"]["wave.end"] == pytest.approx([10, 3 * math.sin(10)])
+    el = next(x for x in r.results if x.name == "s").info["sketch"]["curves"]["el"]
+    assert el["kind"] == "ellipse" and len(el["samples"]) == 97
+    for bad, msg in [('("ellipse", "o", 0, 3)', "ellipse"), ('("parametric", "t", "y", 0, 1)', "unknown name"),
+                     ('("parametric", "t", "__import__(1)", 0, 1)', "only the math"), ('("parametric", "t", "t.real", 0, 1)', "only arithmetic"),
+                     ('("parametric", "t", "1/(t-0.5)", 0, 1)', "evaluate"), ('("parametric", "1", "1", 0, 1)', "no size"),
+                     ('("parametric", "t", "t", 1, 0)', "t1 > t0"), ('("parametric", "t", "\\"a\\"", 0, 1)', "only numbers")]:
+        res = run(f's = sketch(points={{"o": (0, 0)}}, curves={{"c": {bad}}})\n').results[0]
+        assert res.status == "error" and msg in res.message, (bad, res.message)
+
+
+def test_sketch_curves_are_named_edges_and_paths():
+    import math
+    r = run('path = sketch(at=world.anchor("XZ"), points={"a": (0, 0), "b": (0, 30), "o": (20, 30), "c": (20, 50)},\n'
+            '    curves={"up": ("line", "a", "b"), "bend": ("arc", "o", "c", "b"), "guide": ("line", "a", "c", "construction")},\n'
+            '    constraints=[("vertical", "up")])\n'
+            'sec = sketch(points={"o": (0, 0)}, curves={"ring": ("circle", "o", 3)})\n'
+            'tube = sweep(sec, path)\n'
+            'leg = sweep(sec, path.edge("up"), op="new")\n'
+            'both = sweep(sec, [path.edge("bend"), path.edge("up")])\n'
+            'diag = sweep(sec, path.edge("guide"))\n'
+            'a = set_anchor(sec, "m", at=path.anchor("b"))\n')
+    assert all(x.status == "ok" for x in r.results), r.report()
+    assert topo.volume(r.bodies["tube"].shape) == pytest.approx(math.pi * 9 * (30 + 20 * math.pi / 2), rel=1e-6)
+    assert topo.volume(r.bodies["leg"].shape) == pytest.approx(math.pi * 9 * 30, rel=1e-6)
+    assert topo.volume(r.bodies["both"].shape) == pytest.approx(topo.volume(r.bodies["tube"].shape), rel=1e-6)
+    sk = r.bodies["path"]
+    assert [n for n, _, _ in sk.curves()] == ["up", "bend", "guide"]
+    assert len(sk.edges_named("bend")) == 1 and sk.edge_label(sk.edges_named("up")[0]) == "up"
+    from openfusion.export import scene
+    b = next(x for x in scene(r)["bodies"] if x["id"] == "path")
+    assert b["sketch"] and [(e["label"], e.get("construction", False)) for e in b["edges"]] == [("up", False), ("bend", False), ("guide", True)]
+    bad = run('s = sketch(points={"o": (0, 0)}, curves={"c": ("circle", "o", 3)})\nt = sweep(s, s.edge("nope"))\n').results[-1]
+    assert bad.status == "error" and "no curve 'nope'" in bad.message and "(it has c)" in bad.message
+    two = run('s = sketch(points={"o": (0, 0), "p": (10, 0)}, curves={"c": ("circle", "o", 3), "d": ("circle", "p", 2)})\n'
+              'q = sketch(at=world.anchor("XZ"), points={"o": (0, 0)}, curves={"r": ("circle", "o", 1)})\nt = sweep(q, s)\n').results[-1]
+    assert two.status == "error" and "several closed curves" in two.message

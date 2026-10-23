@@ -470,6 +470,13 @@ class EdgeRef(Ref):
 
     def resolve(self, ctx):
         from .body import split_edge_name
+        body = ctx.body(self.handle, allow_removed=True)
+        for n, e, _ in body.curves():           # a sketch's curve, by name
+            if n == self.name:
+                return body, [e]
+        if body.curves():
+            raise RefError(f"{self!r}: the sketch has no curve {self.name!r} "
+                           f"(it has {', '.join(n for n, _, _ in body.curves())})")
         a, b = split_edge_name(self.name)
         return EdgeBetweenRef(FaceRef(self.handle, a), FaceRef(self.handle, b)).resolve(ctx, who=repr(self))
 

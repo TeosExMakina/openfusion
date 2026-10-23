@@ -35,11 +35,13 @@ export class Viewport {
     this.scene.add(this.camera);
     this.root = new THREE.Group(); this.scene.add(this.root);
     this.overlay = new THREE.Group(); this.scene.add(this.overlay);       // snap dots, triads, picks
+    this.pointGroup = new THREE.Group(); this.scene.add(this.pointGroup); // a point shown from a list (View attributes)
     this.temp = new THREE.Group(); this.scene.add(this.temp);             // rubber bands, measure lines
     this.grid = null; this.localGrid = null; this.gridKey = ""; this.gridStep = 1;
     this.localFrame = null; this.localKey = ""; this.localStep = 0;
     this.axes = this.makeAxes(); this.scene.add(this.axes);
-    this.show = { anchors: false, ghosts: false, grid: true };
+    this.show = { anchors: false, ghosts: false, grid: true, origin: false };
+    this.originForced = false; this.originGroup = null; this.originKey = "";
     this.onFrame = []; this.anim = null;
     this.hidden = new Set();
     this.opacity = new Map();          // body id -> 0..1, set from the body menu (see-through to check walls)
@@ -52,7 +54,7 @@ export class Viewport {
       requestAnimationFrame(loop);
       if (this.anim) this.stepAnim(now);
       this.controls.update();
-      this.updateGrid(); this.updateAxes(); this.updateLocalGrid(); this.updateScreenSized();
+      this.updateGrid(); this.updateAxes(); this.updateLocalGrid(); this.updateOrigin(); this.updateScreenSized();
       this.renderer.render(this.scene, this.camera);
       for (const f of this.onFrame) f();
     };
@@ -104,7 +106,10 @@ export class Viewport {
         for (let i = 0; i + 3 < e.p.length; i += 3) pts.push(e.p[i], e.p[i + 1], e.p[i + 2], e.p[i + 3], e.p[i + 4], e.p[i + 5]);
         if (!pts.length) continue;
         const geo = new THREE.BufferGeometry(); geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-        const ln = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isRef ? col("--ref") : col("--edge"), transparent: true, opacity: isRef ? 0.6 : 0.85 }));
+        const ln = e.construction       // a sketch's construction curve: dashed
+          ? new THREE.LineSegments(geo, new THREE.LineDashedMaterial({ color: col("--ref"), transparent: true, opacity: 0.6, dashSize: this.modelSize * 0.015, gapSize: this.modelSize * 0.01 }))
+          : new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isRef ? col("--ref") : col("--edge"), transparent: true, opacity: isRef ? 0.6 : 0.85 }));
+        if (e.construction) ln.computeLineDistances();
         ln.userData = { kind: "edge", body: b.id, label: e.label, ref: `${b.id}.edge(${q(e.label)})`, points: e.p };
         g.add(ln); this.edgeLines.push(ln);
       }
@@ -119,6 +124,57 @@ export class Viewport {
     this.applyHighlights();
     this.applySection();
     if (first || !keepCamera) this.frame("iso");
+  }
+
+  // ---------------------------------------------------------------- origin planes
+  // Fusion's Origin folder: the XY, XZ and YZ planes through the world origin, drawn as
+  // see-through squares you can click to sketch on or to use as a plane or anchor. Shown with
+  // the Origin toggle, and whenever a tool is asking for a plane or an anchor.
+  originVisible() { return this.show.origin || this.originForced; }
+  setOriginForced(on) { if (this.originForced !== !!on) { this.originForced = !!on; this.originKey = null; } }
+
+  updateOrigin() {
+    const vis = this.originVisible();
+    const size = Math.max(20, Math.ceil(this.modelSize * 0.6 / 10) * 10);
+    const key = vis ? `${size}` : "";
+    if (key === this.originKey) return;
+    this.originKey = key;
+    if (this.originGroup) { this.scene.remove(this.originGroup); this.originGroup.traverse((o) => { o.geometry && o.geometry.dispose(); o.material && o.material.dispose(); }); this.originGroup = null; }
+    if (!vis) return;
+    const g = new THREE.Group();
+    for (const [name, pl] of Object.entries(ORIGIN_PLANES)) {
+      const x = new THREE.Vector3(...pl.x), z = new THREE.Vector3(...pl.z), y = z.clone().cross(x);
+      const h = size / 2, corners = [[-h, -h], [h, -h], [h, h], [-h, h]].map(([a, b]) => x.clone().multiplyScalar(a).addScaledVector(y, b));
+      const geo = new THREE.BufferGeometry().setFromPoints([corners[0], corners[1], corners[2], corners[0], corners[2], corners[3]]);
+      geo.computeVertexNormals();
+      const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: col(pl.color), transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false }));
+      m.renderOrder = 3;
+      m.userData = { kind: "origin", plane: name, ref: `world.anchor(${q(name)})`, frame: { o: [0, 0, 0], x: pl.x, y: y.toArray(), z: pl.z } };
+      const edge = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners), new THREE.LineBasicMaterial({ color: col(pl.color), transparent: true, opacity: 0.6 }));
+      edge.raycast = () => {}; edge.userData = { kind: "origin-edge", plane: name };
+      g.add(m, edge);
+    }
+    this.originGroup = g; this.scene.add(g);
+  }
+
+  // The origin plane under the cursor, if it is nearer than any face there: {plane, ref, frame, point}
+  pickOrigin(ev) {
+    if (!this.originGroup) return null;
+    this.ray.setFromCamera(this.ndc(ev), this.camera);
+    const hs = this.ray.intersectObjects(this.originGroup.children.filter((o) => o.userData.kind === "origin"), false);
+    if (!hs.length) return null;
+    const faces = this.hits(ev, { edges: false });
+    if (faces.length && faces[0].distance < hs[0].distance - this.worldPerPx()) return null;
+    const u = hs[0].object.userData;
+    return { plane: u.plane, ref: u.ref, frame: u.frame, point: hs[0].point.toArray() };
+  }
+
+  setOriginHover(name) {
+    if (!this.originGroup) return;
+    for (const o of this.originGroup.children) {
+      if (o.userData.kind === "origin") o.material.opacity = o.userData.plane === name ? 0.32 : 0.1;
+      else o.material.opacity = o.userData.plane === name ? 1 : 0.6;
+    }
   }
 
   // ---------------------------------------------------------------- section view
@@ -317,7 +373,7 @@ export class Viewport {
         obj.setLength(Math.max(u.arrowLen, head * 1.2), head, w * 8);
       }
     };
-    for (const g of [this.overlay, this.temp, this.patternGroup]) if (g) g.traverse(visit);
+    for (const g of [this.overlay, this.temp, this.patternGroup, this.pointGroup]) if (g) g.traverse(visit);
   }
 
   // An anchor's axes and knob, `px` screen pixels long whatever the zoom.
@@ -577,6 +633,20 @@ export class Viewport {
       m.renderOrder = op < 1 ? 2 : 0;
       m.material.needsUpdate = true;
     }
+  }
+
+  // A point picked from a list: a dot with its axes, drawn over everything. strong: the marked
+  // one (selection colour); otherwise the hovered one (accent).
+  setPointMark(fr, strong = false) {
+    this.pointGroup.clear();
+    if (!fr || !fr.o) return;
+    const g = fr.x && fr.z ? this.triad({ o: fr.o, x: fr.x, z: fr.z, y: new THREE.Vector3(...fr.z).cross(new THREE.Vector3(...fr.x)).toArray() }, 30, { kind: "point-mark" }, true).group : new THREE.Group();
+    if (!fr.x) { g.position.set(...fr.o); g.userData.px = 30; }
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.2, 14, 10), new THREE.MeshBasicMaterial({ color: strong ? col("--sel") : col("--accent"), depthTest: false }));
+    dot.renderOrder = 12; dot.raycast = () => {};
+    g.add(dot);
+    g.traverse((o) => { o.raycast = () => {}; });
+    this.pointGroup.add(g);
   }
 
   setHover(key) { if (this.highlight.hover !== key) { this.highlight.hover = key; this.applyHighlights(); } }
@@ -853,6 +923,13 @@ const VIEWS = {
 };
 
 // Direction from the target to the camera. Straight up or down is nudged so "front" stays at the bottom.
+// world.anchor("XY" / "XZ" / "YZ"): the frames the engine gives them (refs.py WORLD_PLANES)
+export const ORIGIN_PLANES = {
+  XY: { x: [1, 0, 0], z: [0, 0, 1], color: "--z" },
+  XZ: { x: [1, 0, 0], z: [0, -1, 0], color: "--y" },
+  YZ: { x: [0, 1, 0], z: [1, 0, 0], color: "--x" },
+};
+
 export function viewDir(view) {
   const d = new THREE.Vector3(...(Array.isArray(view) ? view : VIEWS[view] || VIEWS.home));
   if (Math.abs(d.x) < 1e-9 && Math.abs(d.y) < 1e-9) d.y = -1e-3 * Math.sign(d.z || 1);

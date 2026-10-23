@@ -137,3 +137,70 @@ def test_http_start_screen_then_open(ws, tmp_path):
         assert v1 != v2
     finally:
         srv.shutdown()
+
+
+def test_documents_panel_lists_saves_copies_renames_and_creates(tmp_path):
+    """The Documents panel works in the browser too (no dialogs needed): it lists the parts
+    next to the open one, saves copies, renames the open part and makes new ones."""
+    folder = tmp_path / "work"
+    folder.mkdir()
+    f = folder / "bracket.ofs"
+    f.write_text(NEW_PART + "b = box(length=1, width=1, height=1)\n")
+    (folder / "lid.ofs").write_text(NEW_PART)
+    (folder / "notes.txt").write_text("x")
+    ws = Workspace(Session(str(f)), support_dir=tmp_path / "s", parts_dir=tmp_path / "Parts")
+    d = ws.file_action("/api/file/documents", {})
+    assert d["current"]["name"] == "bracket" and not d["app"]
+    assert [x["label"] for x in d["folders"]] == ["This folder"]          # no parts folder yet
+    assert sorted(p["name"] for p in d["folders"][0]["parts"]) == ["bracket", "lid"]
+    # a copy, staying in the original
+    s0 = ws.session
+    out = ws.file_action("/api/file/save_as", {"name": "bracket v2", "open": False})
+    assert out["saved"] == str(folder / "bracket v2.ofs") and ws.session is s0
+    assert (folder / "bracket v2.ofs").read_text() == f.read_text()
+    with pytest.raises(se.EditError, match="already exists"):
+        ws.file_action("/api/file/save_as", {"name": "lid"})
+    with pytest.raises(se.EditError, match="can't contain"):
+        ws.file_action("/api/file/save_as", {"name": "../escape"})
+    with pytest.raises(se.EditError, match="the part you have open"):
+        ws.file_action("/api/file/save_as", {"name": "bracket"})
+    # a copy, carrying on in it
+    out = ws.file_action("/api/file/save_as", {"name": "bracket v3"})
+    assert ws.session.path == str(folder / "bracket v3.ofs") and out["opened"] == ws.session.path
+    # rename keeps the session (and its undo history); the old file is gone
+    ws.session.write(ws.session.text + "c = box(length=2, width=2, height=2)\n", "add c")
+    s3, v = ws.session, ws.version()
+    ws.file_action("/api/file/rename", {"name": "bracket final"})
+    assert ws.session is s3 and s3.path == str(folder / "bracket final.ofs") and ws.version() != v
+    assert not (folder / "bracket v3.ofs").exists() and "c = box" in (folder / "bracket final.ofs").read_text()
+    assert s3.state()["undo"] == "add c"
+    s3.write(s3.text + "d = box(length=3, width=3, height=3)\n", "add d")    # later edits go to the new file
+    assert "d = box" in (folder / "bracket final.ofs").read_text()
+    with pytest.raises(se.EditError, match="already exists"):
+        ws.file_action("/api/file/rename", {"name": "lid"})
+    assert ws.recent()[0]["name"] == "bracket final"
+    assert "bracket v3" not in [r["name"] for r in ws.recent()]
+    # new parts: next to the open one, or in the parts folder
+    ws.file_action("/api/file/new", {"name": "spacer", "here": True})
+    assert ws.session.path == str(folder / "spacer.ofs")
+    ws.file_action("/api/file/new", {"name": "clip"})
+    assert ws.session.path == str(tmp_path / "Parts" / "clip.ofs")
+    with pytest.raises(se.EditError, match="already exists"):
+        ws.file_action("/api/file/new", {"name": "clip"})
+    d = ws.file_action("/api/file/documents", {})
+    assert [x["label"] for x in d["folders"]] == ["This folder"] and d["folders"][0]["parts"][0]["name"] == "clip"
+    # open another one from the list
+    ws.file_action("/api/file/open", {"path": str(folder / "lid.ofs")})
+    d = ws.file_action("/api/file/documents", {})
+    assert [x["label"] for x in d["folders"]] == ["This folder", "OpenFusion parts"]
+
+
+def test_save_a_copy_where_the_user_chooses(ws, tmp_path):
+    ws.host.answers = [str(tmp_path / "a")]
+    ws.file_action("/api/file/new", {})
+    ws.host.answers = [str(tmp_path / "elsewhere" / "b.ofs")]
+    out = ws.file_action("/api/file/save_as", {"choose": True})
+    assert out["opened"] == str(tmp_path / "elsewhere" / "b.ofs")
+    assert ws.host.saved_kinds[-1] == ("a copy.ofs", "ofs")
+    ws.host.answers = []
+    assert ws.file_action("/api/file/save_as", {"choose": True}) == {"cancelled": True}

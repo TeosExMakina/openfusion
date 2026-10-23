@@ -437,9 +437,12 @@ def body_scene(b) -> dict:
                 entry["snaps"].insert(0, holes[c])
     if True:
         edges = []
-        for e, fs in efmap.items():
+        for e, fs in ({} if b.curves() else efmap).items():
             edges.append({"label": b.edge_label(e, efmap), "p": _r(np.array(edge_polyline(e)))})
-        if not efmap:                     # an open profile (a path): a wire with no faces
+        # a sketch: one pickable edge per curve, whole, named after it (construction ones too)
+        for n, e, k in b.curves():
+            edges.append({"label": n, "p": _r(np.array(edge_polyline(e))), **({"construction": True} if k else {})})
+        if not efmap and not b.curves():  # an open profile (a path): a wire with no faces
             for i, e in enumerate(topo.edges(b.shape)):
                 edges.append({"label": f"seg{i}", "p": _r(np.array(edge_polyline(e)))})
         anchors = []
@@ -450,7 +453,7 @@ def body_scene(b) -> dict:
                 continue
             anchors.append({"name": name, **{k: _r(v) for k, v in fr.as_dict().items()}})
         return {
-            "id": b.id, "role": b.role, "kind": b.kind, "mirrored": b.mirrored,
+            "id": b.id, "role": b.role, "kind": b.kind, "mirrored": b.mirrored, "sketch": bool(b.curves()),
             "volume": round(topo.volume(b.shape), 3), "history": list(b.history),
             "faces": faces, "edges": edges, "anchors": anchors,
         }

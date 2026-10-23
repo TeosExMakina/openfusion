@@ -43,3 +43,25 @@ def sketch_args(args: dict) -> dict:
             raise ValueError("sketch constraints: the app can edit a written-out [...]")
         out["constraints"] = [_seq(e, text) for e in node.elts]
     return out
+
+
+def parse_text(text: str) -> dict:
+    """The sketch panel's Text tab: 'points={...}, curves={...}, constraints=[...]' (any of
+    them, in any order) read the same way as a sketch statement's arguments."""
+    try:
+        call = ast.parse(f"sketch({text})", mode="eval").body
+    except SyntaxError as e:
+        raise ValueError(f"the sketch text doesn't read: {e.msg} (line {e.lineno})") from None
+    if call.args:
+        raise ValueError("write each part as points=..., curves=..., constraints=...")
+    src = f"sketch({text})"
+    args = {}
+    for kw in call.keywords:
+        if kw.arg not in ("points", "curves", "constraints"):
+            raise ValueError(f"the sketch text can set points, curves and constraints, not {kw.arg}")
+        args[kw.arg] = ast.get_source_segment(src, kw.value)
+    out = sketch_args(args)
+    for name, c in out["curves"].items():
+        if not isinstance(c, list):
+            raise ValueError(f"curve {name!r}: write it as (kind, ...), e.g. (\"line\", \"a\", \"b\")")
+    return out

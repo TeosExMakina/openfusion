@@ -24,6 +24,13 @@ Curves (a trailing "construction" makes a curve guide-only: solved, never part o
     ("spline", p1, p2, ..., pn)      smooth curve through the points ("closed" to close it)
     ("project", edge)                an edge of another body, flattened onto the sketch plane:
                                      fixed; its ends are "<name>.start" / "<name>.end"
+    ("ellipse", centre, rx, ry)      half-widths along X and Y; ("ellipse", c, rx, ry, angle) turns it
+    ("parametric", "x(t)", "y(t)", t0, t1)
+                                     the curve x(t), y(t) for t from t0 to t1, e.g.
+                                     ("parametric", "20*cos(t)", "10*sin(2*t)", 0, 2*pi): math with
+                                     sin cos tan sqrt exp log pi...; a parameter goes in with an
+                                     f-string, f"{P.r}*cos(t)"; fixed; its ends are "<name>.start"
+                                     / "<name>.end" (closed when they meet)
 Points are (x, y) or an anchor of another body (fixed where it projects onto the plane).
 A curve's points can also be named through it: "top.start", "top.end", "hole.center".
 
@@ -47,10 +54,10 @@ import math
 
 import numpy as np
 
-KINDS = ("line", "arc", "circle", "spline", "project")
+KINDS = ("line", "arc", "circle", "spline", "project", "ellipse", "parametric")
 TOL = 1e-9               # mm: a constraint this close is met
 ALIAS = {"line": ("start", "end"), "arc": ("center", "start", "end"), "circle": ("center",),
-         "project": ("start", "end")}
+         "project": ("start", "end"), "ellipse": ("center",), "parametric": ("start", "end")}
 
 
 class SketchError(ValueError):
@@ -104,6 +111,20 @@ class Model:
             if len(rest) != 1:
                 raise SketchError(f"curve {n!r}: ('project', body.edge(...))")
             return Curve(n, kind, [], construction=construction, fixed=True)
+        if kind == "ellipse":
+            if len(rest) not in (3, 4) or not all(isinstance(v, (int, float)) for v in rest[1:]) or \
+                    not (rest[1] > 0 and rest[2] > 0):
+                raise SketchError(f"curve {n!r}: ('ellipse', centre, rx, ry) or ('ellipse', centre, rx, ry, angle)")
+            c = Curve(n, kind, [self.point(rest[0])], construction=construction)
+            c.rx, c.ry, c.angle = float(rest[1]), float(rest[2]), float(rest[3]) if len(rest) == 4 else 0.0
+            return c
+        if kind == "parametric":
+            if len(rest) != 4 or not all(isinstance(v, str) for v in rest[:2]) or \
+                    not all(isinstance(v, (int, float)) for v in rest[2:]) or not rest[3] > rest[2]:
+                raise SketchError(f"curve {n!r}: ('parametric', \"x(t)\", \"y(t)\", t0, t1) with t1 > t0")
+            c = Curve(n, kind, [], construction=construction, fixed=True)
+            c.expr, c.span = (rest[0], rest[1]), (float(rest[2]), float(rest[3]))
+            return c
         if kind == "circle":
             if len(rest) != 2 or not isinstance(rest[1], (int, float)) or not rest[1] > 0:
                 raise SketchError(f"curve {n!r}: ('circle', centre, radius)")
@@ -131,8 +152,8 @@ class Model:
                 i = ALIAS[c.kind].index(part)
                 if i < len(c.pts):
                     return c.pts[i]
-            if c is not None and c.kind == "project":
-                return ref                   # filled in when the edge is projected
+            if c is not None and c.kind in ("project", "parametric"):
+                return ref                   # filled in when the edge is projected / the curve evaluated
         raise SketchError(f"no point {ref!r}")
 
     def curve(self, ref, kinds=None):
@@ -579,10 +600,23 @@ def build(model: Model, fr):
                 else:
                     s, t = (c.pts[1], c.pts[2]) if c.kind == "arc" else (c.pts[0], c.pts[1])
                     e = BRepBuilderAPI_MakeEdge(circ, P3(pt(s)), P3(pt(t))).Edge()
+            elif c.kind == "ellipse":
+                from OCP.gp import gp_Elips
+                ctr = pt(c.pts[0])
+                big, small, ang = (c.rx, c.ry, c.angle) if c.rx >= c.ry else (c.ry, c.rx, c.angle + 90.0)
+                a = math.radians(ang)
+                xd = np.cos(a) * np.asarray(fr.x) + np.sin(a) * np.asarray(fr.y)
+                e = BRepBuilderAPI_MakeEdge(gp_Elips(gp_Ax2(P3(ctr), gp_Dir(*fr.z), gp_Dir(*xd)), big, small)).Edge()
+                ts = np.linspace(0, 2 * math.pi, 97)
+                ca, sa = math.cos(math.radians(c.angle)), math.sin(math.radians(c.angle))
+                c.samples = [[ctr[0] + c.rx * math.cos(t) * ca - c.ry * math.sin(t) * sa,
+                              ctr[1] + c.rx * math.cos(t) * sa + c.ry * math.sin(t) * ca] for t in ts]
             else:                     # spline, or a projected free-form edge
                 from OCP.GeomAPI import GeomAPI_Interpolate
                 from OCP.collections import HArray1_gp_Pnt
                 ps = [pt(n) for n in c.pts] if c.kind == "spline" else c.samples
+                if c.closed and c.kind != "spline" and np.linalg.norm(np.subtract(ps[0], ps[-1])) < 1e-9:
+                    ps = ps[:-1]              # a closed curve's samples end where they began
                 arr = HArray1_gp_Pnt(1, len(ps))
                 for i, p in enumerate(ps):
                     arr.SetValue(i + 1, P3(p))
@@ -778,6 +812,8 @@ def _sketch_impl(ctx, at=None, points=None, curves=None, constraints=None, spin=
     for n, c in curves.items():
         if c[0] == "project":
             _project(ctx, m, n, c[1], fr)
+        elif c[0] == "parametric":
+            _parametric(m, n)
     st = solve(m)
     if not st["solved"]:
         raise RuntimeError("sketch: these constraints can't all be met: " + "; ".join(st["unmet"] or ["(an arc's ends)"]))
@@ -810,9 +846,69 @@ def _sketch_impl(ctx, at=None, points=None, curves=None, constraints=None, spin=
         "dof": st["dof"],
         "regions": [_region_info(f, n, piece, pr, fr) for f, n, piece, pr in regions]}
     params = (("sketch", True), ("owner", owner),
-              ("edges", tuple(edge_names)), ("dof", st["dof"]))
+              ("edges", tuple(edge_names)), ("dof", st["dof"]),
+              ("curves", tuple((n, e, k) for e, n, k in edges)))     # every curve whole, by name (paths, s.edge("arc"))
     ctx.put(Body(id=ctx.fid, shape=shape, frame=fr, face_names=tuple(names), design=ProfileDesign(frames),
                  kind="profile", role="reference", params=params, history=(ctx.fid,)))
+
+
+# ----------------------------------------------------------------- parametric curves
+_MATH = {k: getattr(math, k) for k in ("sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh",
+                                         "tanh", "sqrt", "exp", "log", "log10", "radians", "degrees", "floor", "ceil",
+                                         "hypot")}
+_MATH.update(pi=math.pi, e=math.e, tau=math.tau, abs=abs, min=min, max=max)
+
+
+def math_expr(text, names):
+    """Compile a math expression (numbers, + - * / ** %, the math functions above, and the
+    given names) to a function of those names' values. Nothing else is allowed: no
+    attributes, no imports, no strings."""
+    import ast
+    tree = ast.parse(text, mode="eval")
+    ok = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Call, ast.Name, ast.Load, ast.Constant, ast.operator,
+          ast.unaryop, ast.IfExp, ast.Compare, ast.cmpop)
+    for node in ast.walk(tree):
+        if not isinstance(node, ok):
+            raise SketchError(f"{text!r}: only arithmetic and math functions are allowed")
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
+            raise SketchError(f"{text!r}: only numbers are allowed")
+        if isinstance(node, ast.Name) and node.id not in _MATH and node.id not in names:
+            raise SketchError(f"{text!r}: unknown name {node.id!r} (use t and the math functions; put a parameter "
+                              f"in with an f-string: f\"{{P.r}}*cos(t)\")")
+        if isinstance(node, ast.Call) and not (isinstance(node.func, ast.Name) and node.func.id in _MATH):
+            raise SketchError(f"{text!r}: only the math functions can be called")
+    code = compile(tree, "<curve>", "eval")
+    return lambda **kw: float(eval(code, {"__builtins__": {}}, {**_MATH, **kw}))      # noqa: S307 (checked above)
+
+
+def _parametric(model, name):
+    """Sample a parametric curve x(t), y(t) finely; it becomes a smooth curve through the samples."""
+    c = model.curves[name]
+    vals = {}
+    fx, fy = (math_expr(e, {"t"}) for e in c.expr)
+    t0, t1 = c.span
+    n = 200
+    pts = []
+    for k in range(n + 1):
+        t = t0 + (t1 - t0) * k / n
+        try:
+            pts.append([fx(t=t, **vals), fy(t=t, **vals)])
+        except (ValueError, ZeroDivisionError, OverflowError) as err:
+            raise SketchError(f"curve {name!r}: can't evaluate at t={t:g} ({err})")
+    if not all(math.isfinite(v) for p in pts for v in p):
+        raise SketchError(f"curve {name!r}: the expressions don't give finite numbers over t={t0:g}..{t1:g}")
+    span = max(np.ptp(np.array(pts), axis=0))
+    if span < 1e-6:
+        raise SketchError(f"curve {name!r} has no size")
+    c.samples = pts
+    c.shape_kind = "parametric"
+    c.closed = bool(np.linalg.norm(np.subtract(pts[0], pts[-1])) < 1e-7 * max(1.0, span))
+    c.pts = []
+    if not c.closed:
+        for part, p in (("start", pts[0]), ("end", pts[-1])):
+            model.points[f"{name}.{part}"] = list(p)
+            model.fixed.add(f"{name}.{part}")
+            c.pts.append(f"{name}.{part}")
 
 
 def _curve_info(c):

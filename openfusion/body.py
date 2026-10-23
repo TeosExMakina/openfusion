@@ -149,7 +149,20 @@ class Body:
         return [n.label(self.id) for _, n in self.face_names]
 
     # -- edges -------------------------------------------------------------
+    def curves(self) -> list:
+        """A sketch's curves, whole: [(name, edge, construction)] (empty for other bodies)."""
+        return list(dict(self.params).get("curves", ())) if self.kind == "profile" else []
+
     def edge_label(self, edge, efmap=None) -> str:
+        if self.kind == "profile":
+            # a sketch's edges are named after its curves (also the pieces of a curve that
+            # bound a region)
+            for n, e, _ in self.curves():
+                if edge.IsSame(e):
+                    return n
+            for e, n in dict(self.params).get("edges", ()):
+                if edge.IsSame(e):
+                    return n
         efmap = efmap or topo.edge_face_map(self.shape)
         fs = efmap.get(edge, [])
         labels = [self.label_of(f) or "?" for f in fs]
@@ -168,7 +181,10 @@ class Body:
         return out
 
     def edges_named(self, text: str) -> list:
-        """'+X+Z', 'rim+Z', 'a|b' -> edges shared by the two named faces."""
+        """'+X+Z', 'rim+Z', 'a|b' -> edges shared by the two named faces; on a sketch, a curve's name."""
+        for n, e, _ in self.curves():
+            if n == text:
+                return [e]
         a, b = split_edge_name(text)
         fa, fb = self.faces_named(a), self.faces_named(b)
         if not fa or not fb:

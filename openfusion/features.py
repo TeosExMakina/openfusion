@@ -195,20 +195,33 @@ def _start_tangent(wire):
     return t / (np.linalg.norm(t) or 1.0)
 
 
+def _handle_path_edges(ctx, ref):
+    """The edges a whole body gives as a path: a profile's outline, or a sketch's curves (its
+    open curves, if it has both open and closed ones: those are the path and the sections)."""
+    b = ctx.body(ref, allow_removed=True)
+    curves = [(n, e) for n, e, k in b.curves() if not k]
+    if curves:
+        open_ = [(n, e) for n, e in curves if not topo.edge_is_closed(e)]
+        use = open_ or curves
+        if not open_ and len(curves) > 1:
+            raise RefError(f"path: {b.id} has several closed curves; pick one, e.g. {b.id}.edge({curves[0][0]!r})")
+        return [e for _, e in use]
+    ws = topo.wires(b.shape)
+    if not ws:
+        raise RefError(f"path: {b.id} has no edges")
+    return topo.edges(ws[0])
+
+
 def _path(ctx, ref, near=None, normal=None):
     """A wire from a profile (open or closed), or from edge references on solids,
     starting at the end nearest `near`."""
     if isinstance(ref, Handle):
-        b = ctx.body(ref, allow_removed=True)
-        ws = topo.wires(b.shape)
-        if not ws:
-            raise RefError(f"path: {b.id} has no edges")
-        return _chain(topo.edges(ws[0]), near, normal)
+        return _chain(_handle_path_edges(ctx, ref), near, normal)
     items = ref if isinstance(ref, (list, tuple)) else [ref]
     edges = []
     for it in items:
         if isinstance(it, Handle):
-            edges += topo.edges(topo.wires(ctx.body(it, allow_removed=True).shape)[0])
+            edges += _handle_path_edges(ctx, it)
             continue
         _, es = it.resolve(ctx)
         edges += [e for e in es if not any(e.IsSame(x) for x in edges)]

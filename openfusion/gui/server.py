@@ -13,7 +13,9 @@ import os
 import pathlib
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from ..localserver import LocalServer
 from urllib.parse import parse_qs, urlparse
 
 from .. import scriptedit as se
@@ -167,6 +169,32 @@ class Session:
             text, name, _ = self.candidate(req)
             return {"name": name, "statement": _statement(text, name)}
 
+    UPLOAD_KINDS = (".step", ".stp", ".stl", ".3mf")
+
+    def upload(self, name: str, data: str) -> dict:
+        """A file for the part (Import): saved next to it, so the script names it by its own
+        name. A different file of the same name already there is kept; this one gets -2, -3..."""
+        import base64
+        base = os.path.basename(name.replace("\\", "/")).strip()
+        stem, ext = os.path.splitext(base)
+        if ext.lower() not in self.UPLOAD_KINDS or not stem or stem.startswith("."):
+            raise se.EditError("Import takes .step, .stp, .stl and .3mf files")
+        try:
+            blob = base64.b64decode(data, validate=True)
+        except Exception:
+            raise se.EditError("the file didn't arrive whole; try again") from None
+        folder = os.path.dirname(self.path)
+        out, k = base, 2
+        while os.path.exists(os.path.join(folder, out)):
+            if pathlib.Path(folder, out).read_bytes() == blob:
+                break
+            out = f"{stem}-{k}{ext}"
+            k += 1
+        dst = os.path.join(folder, out)
+        if not os.path.exists(dst):
+            pathlib.Path(dst).write_bytes(blob)
+        return {"name": out, "renamed": out != base, "size": len(blob)}
+
     def sketch_source(self, name: str) -> dict:
         """A sketch statement's arguments, taken apart for editing: plain numbers as numbers,
         anything else (an anchor, a projected edge, P.width) as its source text."""
@@ -272,8 +300,14 @@ class Session:
                 self.write(text, f"remove {name}")
                 return {"name": n}
             text = se.delete_feature(self.text, name, cascade=(mode == "cascade"))
-            if self.marker == name:
-                self.marker = None
+            if self.marker is not None:
+                # stay rolled back: if the marker's step (or one before it) goes, it moves to
+                # the nearest step before it that is still there
+                names = [f["name"] for f in self.desc.get("features", [])]
+                left = {f["name"] for f in se.describe(text).get("features", [])}
+                if self.marker in names and self.marker not in left:
+                    before = [n for n in names[:names.index(self.marker)] if n in left]
+                    self.marker = before[-1] if before else None
             self.write(text, f"delete {name}")
             return {}
 
@@ -405,7 +439,10 @@ def make_handler(target):
             if p == "/api/version":
                 return self.send(200, {"version": ws.version()})
             if p == "/api/state":
-                return self.send(200, ws.state())
+                try:
+                    return self.send(200, ws.state())
+                except Exception as e:
+                    return self.send(500, internal_error(ws.session, p, e))
             s = ws.session
             if s is None and p.startswith("/api/"):
                 return self.send(409, {"error": "open a part first"})
@@ -445,11 +482,33 @@ def make_handler(target):
                 return self.send(400, {"error": str(e), "dependents": deps})
             except KeyError as e:
                 return self.send(400, {"error": f"missing field {e}"})
+            except Exception as e:                      # never drop the connection ("Load failed")
+                return self.send(500, internal_error(s, p, e))
             if out is None:
                 return self.send(404, {"error": "unknown action"})
             return self.send(200, out)
 
     return H
+
+
+def internal_error(s, p, e) -> dict:
+    """Something went wrong that isn't the script's fault: log it, then start the engine
+    afresh and rebuild the file from zero, so one bad moment can't leave the app stuck."""
+    import traceback
+    print(f"[{time.strftime('%H:%M:%S')}] internal error in {p}:", flush=True)
+    traceback.print_exc()
+    recovered = False
+    if s is not None:
+        try:
+            with s.lock:
+                s.engine = Engine()
+                s.rebuild()
+            recovered = True
+        except Exception:
+            traceback.print_exc()
+    msg = f"Internal error ({type(e).__name__}: {e})."
+    msg += " The model was rebuilt from scratch; try again." if recovered else " Undo (⌘Z) goes back to the last version."
+    return {"error": msg, "internal": True}
 
 
 def route(s: Session, p: str, req: dict):
@@ -463,6 +522,14 @@ def route(s: Session, p: str, req: dict):
         return s.resolve(str(req["expr"]))
     if p == "/api/sketch_source":
         return s.sketch_source(str(req["name"]))
+    if p == "/api/upload":
+        return s.upload(str(req.get("name", "")), str(req.get("data", "")))
+    if p == "/api/sketch_parse":
+        from .sketchsrc import parse_text
+        try:
+            return parse_text(str(req.get("text", "")))
+        except ValueError as e:
+            raise se.EditError(str(e)) from None
     if p == "/api/selinfo":
         return s.selection_info(list(req.get("items") or []))
     if p == "/api/apply":
@@ -474,6 +541,9 @@ def route(s: Session, p: str, req: dict):
         s.write(se.rename_feature(s.text, req["old"], req["new"]), f"rename {req['old']} to {req['new']}")
         if s.marker == req["old"]:
             s.marker = req["new"]
+        return {"state": s.state()}
+    if p == "/api/fix_names":
+        s.write(se.fix_names(s.text), "give reused names their own")
         return {"state": s.state()}
     if p == "/api/move":
         s.write(se.move_feature(s.text, req["name"], req.get("after")), f"move {req['name']}")
@@ -528,7 +598,7 @@ def make_server(path: str, port: int = 8770):
     if not os.path.exists(path):
         raise SystemExit(f"no such file: {path}")
     ws = Workspace(Session(path))
-    return ThreadingHTTPServer(("127.0.0.1", port), make_handler(ws)), ws
+    return LocalServer(("127.0.0.1", port), make_handler(ws)), ws
 
 
 def serve(path: str, port: int = 8770, open_browser: bool = True):

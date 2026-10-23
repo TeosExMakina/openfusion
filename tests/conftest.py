@@ -24,6 +24,7 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: long checks (shells of lofted parts), run with --slow")
+    config.addinivalue_line("markers", "limit(seconds): this test's own time limit (browser tests drive a real browser)")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -40,7 +41,8 @@ def _time_limit(request):
     if not hasattr(signal, "setitimer"):
         yield
         return
-    limit = SLOW_LIMIT if "slow" in request.node.keywords else request.config.getoption("--max-seconds")
+    own = request.node.get_closest_marker("limit")
+    limit = SLOW_LIMIT if "slow" in request.node.keywords else own.args[0] if own else request.config.getoption("--max-seconds")
 
     def stop(signum, frame):
         pytest.fail(f"took longer than {limit:g} s (the time limit per test)", pytrace=False)

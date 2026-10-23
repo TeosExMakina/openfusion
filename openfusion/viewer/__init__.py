@@ -6,7 +6,9 @@ import os
 import pathlib
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+
+from ..localserver import LocalServer
 from urllib.parse import parse_qs, urlparse
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -155,7 +157,7 @@ def make_server(path: str, port: int = 8765, overrides: dict | None = None):
                 return self.send(200, b"{}", "application/json")
             return self.send(404, b"not found", "text/plain")
 
-    return ThreadingHTTPServer(("127.0.0.1", port), H), w
+    return LocalServer(("127.0.0.1", port), H), w
 
 
 def serve(path: str, port: int = 8765, overrides: dict | None = None, open_browser=True):

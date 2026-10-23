@@ -73,7 +73,12 @@ export class Dialog {
   isMulti(key) { const f = this.field(key); return f && MULTI.has(f.kind); }
 
   init(f, text) {
-    if (f.kind === "pair") {
+    if (f.kind === "scale") {          // one factor (uniform) or (sx, sy, sz)
+      const t = (text || "").trim();
+      const parts = t.startsWith("(") || t.startsWith("[") ? splitList(t) : [t || f.def || "1", t || f.def || "1", t || f.def || "1"];
+      [0, 1, 2].forEach((i) => (this.values[`${f.key}.${i}`] = parts[i] || parts[0] || "1"));
+      this.values[f.key + ".lock"] = !(t.startsWith("(") || t.startsWith("[")) || new Set(parts).size === 1;
+    } else if (f.kind === "pair") {
       const parts = text ? splitList(text) : (f.def || ["", ""]);
       this.values[f.key + ".0"] = parts[0] || ""; this.values[f.key + ".1"] = parts[1] || "";
     } else if (MULTI.has(f.kind)) {
@@ -102,7 +107,10 @@ export class Dialog {
     for (const f of this.tool.fields || []) {
       let v = "";
       if (f.kind === "num") v = normalizeNum(this.values[f.key], params);
-      else if (f.kind === "pair") {
+      else if (f.kind === "scale") {
+        const xs = [0, 1, 2].map((i) => normalizeNum(this.values[`${f.key}.${i}`], params));
+        if (xs.every((x) => x)) v = this.values[f.key + ".lock"] || new Set(xs).size === 1 ? xs[0] : `(${xs.join(", ")})`;
+      } else if (f.kind === "pair") {
         const a = normalizeNum(this.values[f.key + ".0"], params), b = normalizeNum(this.values[f.key + ".1"], params);
         if (a && b) v = `(${a}, ${b})`;
       } else if (f.kind === "choice") {
@@ -157,7 +165,12 @@ export class Dialog {
       const flip = f.flip ? `<button type="button" class="pick flip" tabindex="-1" data-flip="${f.kind === "pair" ? f.key + ".1" : f.key}" title="Flip the direction (negates the value)" aria-label="Flip ${esc(f.label)}">⇄</button>` : "";
       if (f.kind === "num" || f.kind === "text") {
         const input = `<input id="${id}" data-key="${f.key}" value="${esc(this.values[f.key] || "")}" placeholder="${esc(f.placeholder || "")}" autocomplete="off" spellcheck="false">`;
-        html += flip ? `<div class="row flipper">${input}${flip}</div>` : input;
+        const file = f.file ? `<button type="button" class="pick" tabindex="-1" data-file="${f.key}" data-accept="${esc(f.file)}">Choose…</button>` : "";
+        html += flip ? `<div class="row flipper">${input}${flip}</div>` : file ? `<div class="slot">${input}${file}</div>` : input;
+      } else if (f.kind === "scale") {
+        const lock = this.values[f.key + ".lock"];
+        html += `<div class="row scale-row">${["X", "Y", "Z"].map((a, i) => `<input ${i ? "" : `id="${id}"`} data-key="${f.key}.${i}" aria-label="${esc(f.label)} ${a}" placeholder="${a}" value="${esc(this.values[`${f.key}.${i}`])}" autocomplete="off">`).join("")}` +
+          `<button type="button" class="pick lock" data-lock="${f.key}" aria-pressed="${lock}" title="${lock ? "Uniform: X, Y and Z change together. Click to set them separately." : "Separate X, Y and Z. Click to make them change together."}">${lock ? "🔗 Uniform" : "XYZ"}</button></div>`;
       } else if (f.kind === "pair") {
         html += `<div class="row${flip ? " flipper" : ""}"><input id="${id}" data-key="${f.key}.0" placeholder="${esc(f.labels[0])}" value="${esc(this.values[f.key + ".0"])}" autocomplete="off">` +
           `<input data-key="${f.key}.1" aria-label="${esc(f.label)} ${esc(f.labels[1])}" placeholder="${esc(f.labels[1])}" value="${esc(this.values[f.key + ".1"])}" autocomplete="off">${flip}</div>`;
@@ -192,6 +205,12 @@ export class Dialog {
       });
     });
     d.querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => this.activate(b.dataset.pick)));
+    d.querySelectorAll("[data-file]").forEach((b) => b.addEventListener("click", () => this.chooseFile(b.dataset.file, b.dataset.accept)));
+    d.querySelectorAll("[data-lock]").forEach((b) => b.addEventListener("click", () => {
+      const k = b.dataset.lock; this.values[k + ".lock"] = !this.values[k + ".lock"];
+      if (this.values[k + ".lock"]) [1, 2].forEach((i) => (this.values[`${k}.${i}`] = this.values[`${k}.0`]));
+      this.render(); this.schedule();
+    }));
     d.querySelectorAll("[data-all]").forEach((b) => b.addEventListener("click", () => this.allEdges(b.dataset.all)));
     d.querySelectorAll("[data-flip]").forEach((b) => b.addEventListener("click", () => this.flip(b.dataset.flip)));
     d.querySelectorAll("[data-axis]").forEach((b) => b.addEventListener("click", () => {
@@ -232,6 +251,10 @@ export class Dialog {
     }
     if (this.isMulti(key)) this.items[key] = el.value.trim().startsWith("[") || !el.value.trim() ? splitList(el.value) : [el.value.trim()];
     else this.values[key] = el.value;
+    const m = key.match(/^(.+)\.(\d)$/), sf = m && this.field(m[1]);
+    if (sf && sf.kind === "scale" && this.values[m[1] + ".lock"]) {      // uniform: the other two follow
+      [0, 1, 2].forEach((i) => { const k2 = `${m[1]}.${i}`; this.values[k2] = el.value; const o = $("dialog").querySelector(`input[data-key="${k2}"]`); if (o && o !== el) o.value = el.value; });
+    }
     const f = this.field(key);
     if (f && f.kind === "anchor") { delete this.frames[key]; this.resolve(key); }
     this.schedule();
@@ -265,12 +288,37 @@ export class Dialog {
     }, 250);
   }
 
+  // a file for a field (Import): copied next to the part on the server, the field gets its name
+  chooseFile(key, accept) {
+    const inp = document.createElement("input");
+    inp.type = "file"; inp.accept = accept; inp.style.display = "none";
+    document.body.append(inp);
+    inp.addEventListener("change", async () => {
+      const file = inp.files && inp.files[0];
+      inp.remove();
+      if (!file) return;
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+        toast(`Copying ${file.name}…`);
+        const out = await post("/api/upload", { name: file.name, data: btoa(bin) });
+        this.values[key] = out.name;
+        this.render(); this.schedule();
+        toast(out.renamed ? `Copied as ${out.name} (a different ${file.name} is already there)` : `Copied ${out.name} next to the part`);
+      } catch (e) { toast(e.message, true); }
+    });
+    inp.click();
+  }
+
   activate(key, fromFocus = false) {
     if (key === "points" && this.tool.polyline && !fromFocus && this.frames.at && this.stage !== "points") {
       return this.beginPoints({ ref: this.values.at, frame: this.frames.at }, this.plane, true);
     }
     if (key !== "at") this.stage = this.stage === "plane" || this.stage === "start" || this.stage === "points" ? null : this.stage;
     this.active = key; this.cands = null; this.sizing = null;
+    const af = this.field(key);
+    this.vp.setOriginForced(!!(af && af.kind === "anchor"));      // the origin planes are clickable while picking an anchor
     this.vp.showSnaps(null); this.vp.clearTemp();
     this.markActive();
     this.app.setHint(key ? this.hintFor(key) : "Adjust values (Tab moves between them), then OK (Enter).");
@@ -364,8 +412,18 @@ export class Dialog {
 
   anchorHover(ev) {
     const knob = this.vp.pickKnob(ev);
+    const org = knob ? null : this.vp.pickOrigin(ev);
+    this.vp.setOriginHover(org ? org.plane : null);
     if (knob) {
       this.cands = [{ ref: knob.ref, p: knob.frame.o, frame: knob.frame, kind: "anchor", body: knob.body }]; this.candIdx = 0;
+    } else if (org) {
+      // an origin plane: a point on it (kept as an offset from the plane's anchor), or its centre
+      this.vp.setHover(null);
+      const center = { ref: org.ref, p: org.frame.o, frame: org.frame, kind: "center" };
+      const free = this.freeCandidate(ev, center);
+      this.cands = free ? [free, center] : [center];
+      this.candIdx = free && this.vp.nearestSnap(ev, [center]) < 0 ? 0 : this.cands.length - 1;
+      this.cands.faceRef = org.ref;
     } else {
       const hit = this.vp.pick(ev, "face");
       if (hit) {
@@ -498,7 +556,7 @@ export class Dialog {
     }
     else if (f.kind === "path") {
       const ref = this.pathRef(hit);
-      if (this.isProfile(hit.body)) { this.items[f.key] = []; this.setSlot(f.key, ref); this.advance(f.key); }
+      if (this.wholeProfile(hit)) { this.items[f.key] = []; this.setSlot(f.key, ref); this.advance(f.key); }
       else { if ((this.items[f.key] || []).some((x) => !x.includes(".edge"))) this.items[f.key] = []; this.toggleItem(f.key, ref, "edge:" + hit.ref); }
     }
     else if (f.kind === "line") {
@@ -536,8 +594,12 @@ export class Dialog {
   // a profile stands for its face: write the profile's name, not profile.face("face")
   faceRef(hit) { return this.isProfile(hit.body) ? this.app.exprFor(hit.body, true) : this.app.fixRef(hit.ref, true); }
 
+  isSketch(id) { const b = this.vp.body(id); return !!b && !!b.sketch; }
+  // a click that means the whole profile or sketch (not one of a sketch's curves)
+  wholeProfile(hit) { return this.isProfile(hit.body) && !(hit.kind === "edge" && this.isSketch(hit.body)); }
+
   pathRef(hit) {
-    if (this.isProfile(hit.body)) return this.app.exprFor(hit.body, true);
+    if (this.wholeProfile(hit)) return this.app.exprFor(hit.body, true);
     return this.app.fixRef(hit.ref, true) + (hit.kind === "face" ? ".edges()" : "");
   }
 
@@ -1040,6 +1102,7 @@ export class Dialog {
     if (this.polyGroup) { this.vp.scene.remove(this.polyGroup); this.polyGroup = null; }
     if (this.hiddenCopies) { this.hiddenCopies.forEach((id) => this.vp.hidden.delete(id)); this.hiddenCopies = null; }
     this.vp.showSnaps(null); this.vp.clearTemp(); this.vp.showLocalGrid(null); this.vp.setSelected([]);
+    this.vp.setOriginForced(false); this.vp.setOriginHover(null);
     $("dialog").hidden = true; $("dialog").innerHTML = "";
   }
 }

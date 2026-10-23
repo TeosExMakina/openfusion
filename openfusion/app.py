@@ -108,6 +108,12 @@ def _menus(ws: Workspace, host: WebviewHost):
     def open_part():
         ws.file_action("/api/file/open", {})
 
+    def documents():
+        _js(host, "window.ofApp && window.ofApp.openDocs()")
+
+    def save_copy():
+        ws.file_action("/api/file/save_as", {"choose": True, "open": True})
+
     def export():
         _js(host, "window.ofApp && window.ofApp.openExport()")
 
@@ -130,7 +136,8 @@ def _menus(ws: Workspace, host: WebviewHost):
         open_ex.__name__ = f"example_{ex['name']}"
         examples.append(MenuAction(ex["name"].replace("_", " ").title(), guard(open_ex)))
 
-    file_items = [MenuAction("New Part…  (⌘N)", guard(new_part)), MenuAction("Open…  (⌘O)", guard(open_part))]
+    file_items = [MenuAction("New Part…  (⌘N)", guard(new_part)), MenuAction("Open…  (⌘O)", guard(open_part)),
+                  MenuAction("Documents…  (⌘⇧O)", guard(documents)), MenuAction("Save a Copy As…  (⌘⇧S)", guard(save_copy))]
     if examples:
         file_items.append(Menu("Open Example", examples))
     file_items += [MenuSeparator(), MenuAction("Export…  (⌃⇧E)", guard(export)),
@@ -183,7 +190,7 @@ def main(argv=None, exit_process=True):
         import webview
     except ImportError:
         raise SystemExit("The desktop app needs pywebview: pip install 'openfusion[app]'")
-    from http.server import ThreadingHTTPServer
+    from .localserver import LocalServer
 
     support = pathlib.Path(os.environ.get("OPENFUSION_SUPPORT", "")) if os.environ.get("OPENFUSION_SUPPORT") else default_support_dir()
     support.mkdir(parents=True, exist_ok=True)
@@ -198,7 +205,7 @@ def main(argv=None, exit_process=True):
                 print("could not open", a, e, flush=True)
 
     port = _free_port()
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(ws))
+    srv = LocalServer(("127.0.0.1", port), make_handler(ws))
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     watch_forever(ws)

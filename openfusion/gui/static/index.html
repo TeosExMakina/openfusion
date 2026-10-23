@@ -52,6 +52,7 @@
       <div class="grp" role="group" aria-label="Show">
         <button id="t-anchors" aria-pressed="false">Anchors</button>
         <button id="t-ghosts" aria-pressed="false">Removed</button>
+        <button id="t-origin" aria-pressed="false" title="The origin planes (XY, XZ, YZ): click one to sketch on it or use it as a plane">Origin</button>
         <button id="t-grid" aria-pressed="true">Grid</button>
         <button id="t-section" aria-pressed="true" hidden title="The view is cut open (Section). Click to close the cut.">Section ✕</button>
       </div>
@@ -65,6 +66,7 @@
     </div>
     <div class="banner" id="banner" hidden></div>
     <div class="dialog" id="dialog" hidden></div>
+    <div class="attrs" id="attrs" hidden role="dialog" aria-label="Attributes"></div>
     <div class="xpanel" id="export-panel" hidden role="dialog" aria-label="Export"></div>
     <div class="tip" id="tip" hidden></div>
     <div class="selbox" id="selbox" hidden></div>
@@ -87,6 +89,7 @@
 <div class="ctx" id="ctx" hidden></div>
 <div class="help" id="help" hidden></div>
 <div class="pp" id="params-panel" hidden></div>
+<div class="pp" id="docs-panel" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

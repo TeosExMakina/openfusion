@@ -87,6 +87,12 @@ def test_app_starts_on_the_start_screen_and_opens_parts(fake_webview, tmp_path, 
         w.dialog_answers = [str(tmp_path / "Parts" / "widget.ofs")]
         next(a for a in file_menu.items if getattr(a, "title", "").startswith("New Part")).function()
         seen["new"] = json.loads(urllib.request.urlopen(base + "/api/state").read())
+        # Documents… opens the panel in the page; Save a Copy As… asks where, then works in the copy
+        next(a for a in file_menu.items if getattr(a, "title", "").startswith("Documents")).function()
+        seen["docs_js"] = w.js[-1]
+        w.dialog_answers = [str(tmp_path / "Parts" / "widget v2.ofs")]
+        next(a for a in file_menu.items if getattr(a, "title", "").startswith("Save a Copy")).function()
+        seen["copy"] = json.loads(urllib.request.urlopen(base + "/api/state").read())["file"]
 
     fake_webview["run"] = run
     ws = app.main([], exit_process=False)
@@ -96,7 +102,8 @@ def test_app_starts_on_the_start_screen_and_opens_parts(fake_webview, tmp_path, 
     assert seen["export"]["path"].endswith("showcase.3mf") and seen["export_file"]
     assert seen["new"]["file"].endswith("widget.ofs") and seen["new"]["scene"]["bodies"] == []
     assert fake_webview["private_mode"] is False and "webview" in fake_webview["storage_path"]
-    assert [r["name"] for r in ws.recent()] == ["widget", "showcase"]
+    assert "openDocs" in seen["docs_js"] and seen["copy"].endswith("widget v2.ofs")
+    assert [r["name"] for r in ws.recent()] == ["widget v2", "widget", "showcase"]
     assert fake_webview["window"].kw["min_size"] == (960, 640)
 
 

@@ -35,33 +35,6 @@ from a Python that is too old: delete `.venv` and recreate it as above.
 No Node.js is needed: the app's frontend ships prebuilt in `openfusion/gui/static/`.
 
 
-## Building the Mac app (for sharing)
-
-OpenFusion also runs as a normal Mac app in its own window: a start screen (new part, open,
-recent files, examples), native Open and Save dialogs, a File menu, exports saved where you
-choose, and double-click to open `.ofs` files from Finder.
-
-**Try the window from your venv first** (quick check, nothing is bundled):
-
-```bash
-pip install -e ".[app]"      # adds pywebview, the native window
-openfusion app               # start screen; or: openfusion app part.ofs
-```
-
-**Build the app to share** (Apple Silicon, macOS 12+; about 10 minutes the first time):
-
-```bash
-./packaging/mac/build_app.sh          # add --open to launch it when done
-```
-
-It downloads a standalone Python 3.12 (through `uv`), installs OpenFusion and its libraries into
-`build-mac/OpenFusion.app`, trims it, precompiles it, tests it by building the showcase, signs
-it ad hoc, and writes `dist/OpenFusion-<version>-arm64.dmg` (and a `.zip`). Your venv and system
-Python are not touched. Send the `.dmg`: it contains the app, an Applications shortcut and
-"Read me first", which explains the one-time "Open Anyway" step. The build has no Apple
-Developer signature, so macOS asks once. The app writes its log to
-`~/Library/Logs/OpenFusion.log`, recent files to `~/Library/Application Support/OpenFusion`,
-and example copies to `~/Documents/OpenFusion`.
 
 ## Building for Linux (Bash)
 
@@ -78,7 +51,6 @@ openfusion app
 ## Building for Windows (PowerShell)
 
 ```bash
-
 cd openfusion
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -87,6 +59,9 @@ python -m pip install -e ".[test,app]"
 python -m pytest
 openfusion app
 ```
+
+
+
 
 
 ## Quick start
@@ -116,7 +91,7 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
 - **Sketch** (⌃⇧K, first button under CREATE). Click a flat face (or empty space for the bed); the
   view turns to face it. Draw with single keys: **L** line (clicks chain; nearly horizontal or
   vertical lines get that constraint), **R** rectangle, **C** circle, **A** arc (centre, start, end,
-  counterclockwise), **O** point, **J** project (click edges of the model: fixed copies that follow it, their ends usable as points), **X** construction (dashed guides that bound no region). Clicking
+  counterclockwise), **⇧E** ellipse (centre, then a corner of the box around it), **O** point, **J** project (click edges of the model: fixed copies that follow it, their ends usable as points), **X** construction (dashed guides that bound no region). Clicking
   near an existing point reuses it. **S** selects (Shift adds); drag a point and the sketch follows,
   keeping its constraints. Constrain the selection with the panel's buttons or keys (**H**
   horizontal, **V** vertical, **I** coincident / on a curve, **P** parallel, **⇧P** perpendicular,
@@ -128,7 +103,21 @@ openfusion gui bracket.ofs           # the modeling app opens in your browser
   panel counts the degrees of freedom left ("Fully constrained" at 0), and constraints that can't
   all be met are refused with the reason. ⌘Z undoes inside the sketch; **Finish sketch** writes one
   `sketch(...)` statement; double-click it in the timeline to edit it again. Push/Pull, Revolve,
-  Loft and Sweep take the sketch (its outline with holes) or one region of it.
+  Loft and Sweep take the sketch (its outline with holes) or one region of it; Sweep also takes its
+  curves one by one as a path.
+  - **Type sizes while you draw.** After the first click, boxes by the cursor show the shape's size
+    live (a line's length and angle, a rectangle's width and height, a circle's diameter, an ellipse's
+    half-widths, an arc's radius and sweep). Just type a number (or `P.width`): it goes into the first
+    box; **Tab** moves to the next, **Enter** places the shape. A typed length, width, height,
+    diameter or radius stays as a dimension.
+  - **The panel shows what's selected, with its values to edit**: a point's X and Y, a line's length,
+    a circle's diameter, an arc's radius, an ellipse's half-widths and angle, a parametric curve's
+    formulas, a dimension's value. Tab between them, Enter sets one; 🔒 means a dimension holds it
+    (click to remove the dimension). A construction tick box is there too.
+  - **Contents**, under it, in tabs: every **Curve**, **Point** and **Constraint** in the sketch.
+    Hover a row to light it up, click to select it, × to delete; dimension values can be edited right
+    in the list. The **Text** tab is the whole sketch as `points=… curves=… constraints=…`: edit any
+    line (add an ellipse or a parametric curve by hand, say) and Apply (⌘Enter).
 - **Hole** (⌃H) and **Thread** (⌃⇧T, in MODIFY ▾). Click a point on a face for a hole; type a screw size (M3)
   and pick the fit: clearance (close, normal, loose), tap drill, or **tapped** for a real, printable ISO thread.
   Counterbore and countersink sizes come from the screw size too. Thread: click a shaft or a hole's wall.
@@ -197,15 +186,36 @@ in a field updates the ghost. The arrows only change the dialog's numbers; one s
 - **Patterns** show their copies see-through, with numbered arrows for each direction (or the axis and turning
   sense), before you press OK. Click an edge of any body for a direction (a hole, round face or circular edge
   for a circular pattern's axis); ⇄ next to a spacing or angle flips it. Errors show in the dialog right away.
-- **Timeline** (bottom): double-click a step to edit it; right-click to rename (every use in the
-  script follows), roll back to it (new steps go there), show it in the script, or delete it.
+- **Origin planes.** Turn on **Origin** (top left) for the XY, XZ and YZ planes through the origin, like
+  Fusion's. Click one to sketch on it, or use it wherever a tool wants a plane or a point (Mirror, Split,
+  a primitive's base). While a tool asks for a point or a plane they show by themselves.
+- **Timeline** (bottom): click a step to pick it (Delete removes it); double-click to edit it. The
+  **marker** after the last step can be dragged back to roll the model back to any step (new steps
+  go in there) and forward again; right-click a step for Go to the end too. Right-click a step to rename (every use in the
+  script follows), roll back to it, show it in the script, view its attributes, or delete it.
   Deleting something other steps depend on offers **Remove instead**, which keeps everything built
   from it.
 - **Opacity.** Right-click a body (in the list or the view) and drag the Opacity slider to see
   through it, handy for checking a shell's inner walls. It is remembered per part on this computer
   and never changes the script.
-- **Bodies** (left): right-click for Make reference (ghost), Remove from here on, Delete. Removed
-  bodies are grouped at the bottom.
+- **Bodies** (left): the selected body is highlighted (and the body of a selected face or edge, more
+  lightly); right-click for View attributes, Make reference (ghost), Remove from here on, Delete.
+  Removed bodies are grouped at the bottom.
+- **View attributes** (right-click a body or sketch, in the list, the view or the timeline): every
+  point (its anchors, then the centres, corners, hole centres and midpoints its faces offer), edge
+  (with its length) and face (kind and area) it defines, by name, in three tabs with a filter. Hover a
+  row and it lights up in the view; click to select it and copy its reference (`plate.face("+Z")`,
+  `s.edge("l1")`), ready to paste into a field or the script.
+- **Documents** (click the file name under OpenFusion, or ⌘⇧O): rename the open part, save a copy under
+  another name (and carry on in it, or stay), make a new part, and open any part next to it, in
+  Documents/OpenFusion, from the recent list or the examples. Parts are saved on every change, so there
+  is no Save; ⌘S says so (or saves the script pane), and ⌘⇧S saves a copy. In the Mac app the native
+  Open and Save dialogs are there as well.
+- **Scale** is uniform by default; click **🔗 Uniform** beside the factors to give X, Y and Z each their
+  own value (`scale(body, (1, 2, 0.5))`).
+- **A name used twice.** If a script assigns the same variable to two steps (`extrude1 = ...` twice),
+  only the second keeps the name; a banner says so and **Name it …** gives the first its own name,
+  fixing every reference to it.
 - **Parameters** (ƒx Parameters in the top bar, ⌃⇧V, or Edit… beside the list on the left): a table of
   every parameter with its expression, current value, comment and the steps that use it. Edit any cell and
   press Enter; rename one and every `P.old` in the script follows; click a step under *Used by* to edit it;
@@ -392,6 +402,10 @@ lug = extrude(s, 5)                    # the outline with its hole; or s.face("h
 
 - **Points** are `(x, y)` on the plane (a starting guess the solver moves) or an anchor (fixed there).
 - **Curves**: `("line", p, q)`, `("circle", centre, r)`, `("arc", centre, start, end)` (counterclockwise),
+  `("ellipse", centre, rx, ry[, angle])` (half-widths along the plane's X and Y, turned by angle),
+  `("parametric", "x(t)", "y(t)", t0, t1)` (any curve from formulas in `t`: `sin`, `cos`, `tan`,
+  `sqrt`, `exp`, `log`, `pi`, `abs`, `atan2`, `**`; closed if it ends where it starts; parameters go
+  in with an f-string, `f"{P.a} * cos(t)"`),
   `("spline", p1, p2, ..., ["closed"])`, `("project", body.edge(...))` (a fixed copy of an edge, its
   ends usable as `name.start` / `name.end`). Add `"construction"` at the end for a guide. Any curve's
   ends and centre are points too: `"bottom.start"`, `"hole.center"`.
@@ -405,8 +419,30 @@ lug = extrude(s, 5)                    # the outline with its hole; or s.face("h
 - **Regions**: the curves split the plane into regions. The sketch's `profile` face is every region
   inside an odd number of loops (an outline with its holes). Each region is also named by the curves
   around it, sorted and joined with `+` (`s.face("hole")`, `s.face("bottom+hole+left+right+top")`);
-  regions with the same curves get `#1`, `#2`... largest first. Extruding a sketch drawn on a body's face
+  regions with the same curves get `#1`, `#2`... largest first.
+- **Curves are edges.** `s.edge("bottom")` is that curve; a list of open curves is a path for
+  `sweep(profile, path=[s.edge("a1"), s.edge("l2")])` (or the whole sketch, if it is one open chain). Extruding a sketch drawn on a body's face
   joins into (or with `op="cut"` cuts) that body, and the side faces are named `side(<curve>)`.
+
+## Importing parts
+
+```python
+bracket = import_file("bracket.step")                       # next to the script, or a full path
+knob = import_file("knob.stl", at=plate.anchor("+Z"), scale=1)
+```
+
+- **STEP** (`.step`, `.stp`) comes in exact: planes, cylinders, fillets, all as they were drawn.
+- **STL and 3MF** meshes become solids: the triangles are joined into a closed surface and every
+  group of coplanar triangles is merged back into one flat face, so a printed part's sides, top and
+  pockets are single faces you can fillet, shell, sketch on and push/pull. Curved areas stay as
+  facets. Tiny gaps between triangles are sewn shut (meshes up to 30,000 triangles); a mesh with
+  real holes is refused with a note to repair it first. Up to 200,000 triangles in all.
+- **Names**: flat faces square to the axes are named like a box's, `+Z`, `-X`...; when several face
+  the same way they are numbered from the outermost in (`+Z#0` the top, `+Z#1` the next one down).
+  Other faces are `plane#k`, `cylinder#k`, `cone#k`, `sphere#k`, `torus#k`, `surface#k`, largest first.
+  The anchors are the bounding box's (`center`, `+X`... like a box), plus the file's own `origin`.
+- `at=` places the file's origin; `scale=25.4` for a part drawn in inches. The part rebuilds when the
+  file changes. In the app, **Import** (under CREATE ▾, ⌃⇧O) copies the file next to the part first.
 
 ## Tolerances
 
@@ -427,11 +463,43 @@ numbers match what a slicer reports. Exported meshes close any gap a face's tria
 - A cut whose tools miss the body is flagged, with a hint about `.flipped()`.
 - A Python error in the script reports its line number.
 
+## The Mac app (for sharing)
+
+OpenFusion also runs as a normal Mac app in its own window: a start screen (new part, open,
+recent files, examples), native Open and Save dialogs, a File menu, exports saved where you
+choose, and double-click to open `.ofs` files from Finder.
+
+**Try the window from your venv first** (quick check, nothing is bundled):
+
+```bash
+pip install -e ".[app]"      # adds pywebview, the native window
+openfusion app               # start screen; or: openfusion app part.ofs
+```
+
+**Build the app to share** (Apple Silicon, macOS 12+; about 10 minutes the first time):
+
+```bash
+./packaging/mac/build_app.sh          # add --open to launch it when done
+```
+
+It downloads a standalone Python 3.12 (through `uv`), installs OpenFusion and its libraries into
+`build-mac/OpenFusion.app`, trims it, precompiles it, tests it by building the showcase, signs
+it ad hoc, and writes `dist/OpenFusion-<version>-arm64.dmg` (and a `.zip`). Your venv and system
+Python are not touched. Send the `.dmg`: it contains the app, an Applications shortcut and
+"Read me first", which explains the one-time "Open Anyway" step. The build has no Apple
+Developer signature, so macOS asks once. The app writes its log to
+`~/Library/Logs/OpenFusion.log`, recent files to `~/Library/Application Support/OpenFusion`,
+and example copies to `~/Documents/OpenFusion`.
+
+**Local network.** The app's window talks to its own engine over `127.0.0.1` (this computer only;
+nothing is reachable from the network). Older versions looked up the computer's network name on
+start, which made macOS ask for Local Network access; since 0.8.2 they don't, so you can say no.
 
 ## What is not built yet
 
 Sketch fillets/trims, offsets and patterns inside a sketch, inch (UNC/UNF) threads, rib, web,
-components and STEP import. In the app, a new
+components. Imported meshes keep their curved areas as facets (cylinders and holes are not yet
+recognised and rebuilt as true round faces). In the app, a new
 step is always inserted as a whole statement; reordering steps by drag and drop is not there yet
 (right-click > Roll back to here, then add, does the same job).
 
@@ -451,6 +519,8 @@ openfusion/
   holes.py       holes (clearance, counterbore, countersink, tapped) and modelled ISO threads
   text.py        lettering profiles (fonts/: Liberation Sans, SIL Open Font License)
   construct.py   construction planes and axes
+  importer.py    STEP, STL and 3MF import (meshes to solids, flat faces merged), face naming
+  localserver.py the local web server (127.0.0.1 only, no network name lookups)
   loftshell.py   shell for bodies with smooth lofts: inner walls as lofts, chunks joined by tubes
   sweepshell.py  shell by sweeping a ball over the skin, for everything else the offset can't do
   export.py      STEP, STL, 3MF, viewer scene
@@ -458,7 +528,7 @@ openfusion/
   viewer/        read-only live and static viewer (three.js r128 vendored, MIT)
   gui/server.py  the modeling app's server: sessions, undo, preview, file watching
   gui/sketchsrc.py  reads a sketch statement back apart for the app's sketch mode
-  gui/workspace.py  documents for the desktop app: start screen, open/new/recent, examples
+  gui/workspace.py  documents: start screen, open/new/recent, examples, rename, save a copy
   app.py         the desktop app: native window (pywebview), dialogs, File menu, Finder opens
   gui/static/    the app's built frontend (three.js, CodeMirror; licenses in app.js.LEGAL.txt)
   cli.py         openfusion command

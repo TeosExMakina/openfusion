@@ -13,10 +13,10 @@ from .document import Document, Engine, current_doc, load_script, load_source
 from .ops import (box, chamfer, combine, cone, coil, copy, cut, extrude, fillet, intersect, join, mirror,
                   move, pattern_circ, pattern_rect, place, place_on_bed, polygon, remove, rotate, scale,
                   set_anchor, set_role, sphere, split, torus, cylinder,
-                  profile, revolve, loft, sweep, shell, draft, sketch, hole, thread, text, plane, axis)
+                  profile, revolve, loft, sweep, shell, draft, sketch, hole, thread, text, plane, axis, import_file)
 from .refs import edge_between, world
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 # ---------------------------------------------------------------- units
 mm = 1.0
@@ -74,5 +74,5 @@ __all__ = [
     "pattern_rect", "pattern_circ", "mirror", "scale",
     "combine", "join", "cut", "intersect", "fillet", "chamfer", "extrude", "split",
     "set_anchor", "set_role", "remove",
-    "profile", "revolve", "loft", "sweep", "shell", "draft", "sketch", "hole", "thread", "text", "plane", "axis",
+    "profile", "revolve", "loft", "sweep", "shell", "draft", "sketch", "hole", "thread", "text", "plane", "axis", "import_file",
 ]

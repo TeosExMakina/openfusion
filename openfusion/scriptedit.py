@@ -30,11 +30,11 @@ OPS = {
     "place", "place_on_bed", "move", "rotate", "copy", "pattern_rect", "pattern_circ", "mirror", "scale",
     "combine", "join", "cut", "intersect", "fillet", "chamfer", "extrude", "split",
     "set_anchor", "set_role", "remove",
-    "profile", "revolve", "loft", "sweep", "shell", "draft", "sketch", "hole", "thread", "text", "plane", "axis",
+    "profile", "revolve", "loft", "sweep", "shell", "draft", "sketch", "hole", "thread", "text", "plane", "axis", "import_file",
 }
 CREATES = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "copy", "mirror",
            "pattern_rect", "pattern_circ", "split", "profile", "revolve", "loft", "sweep", "sketch",
-           "text", "plane", "axis"}
+           "text", "plane", "axis", "import_file"}
 
 
 class EditError(ValueError):
@@ -82,6 +82,9 @@ class Stmt:
     refs: set = field(default_factory=set)   # variable names it reads
     style: str = "kwargs"         # params only: "dict" for params({...}), else "kwargs"
     call_start: int = 0
+    strs: tuple = ()              # string constants in the call (face names like "lug.end")
+    shadowed: bool = False        # its variable is assigned again later, so the step has no name of its own
+    target_span: tuple = (0, 0)   # where the variable is written
 
     def arg(self, key) -> Arg | None:
         return next((a for a in self.args if a.key == key), None)
@@ -104,6 +107,15 @@ class Script:
             return
         for node in self.tree.body:
             self.stmts.append(self._classify(node))
+        # Python keeps only the last value of a variable, and the engine names steps after the
+        # variables that hold them at the end: a step whose variable is assigned again later
+        # gets an automatic name (op1, op2...) like a step with no variable.
+        last = {}
+        for i, st in enumerate(self.stmts):
+            if st.name:
+                last[st.name] = i
+        for i, st in enumerate(self.stmts):
+            st.shadowed = bool(st.name) and last[st.name] != i
 
     # ------------------------------------------------------------ positions
     def off(self, lineno: int, col_bytes: int) -> int:
@@ -126,6 +138,10 @@ class Script:
             st.kind = "doc"
             return st
         call, target = None, None
+        if isinstance(node, ast.Assign):
+            for t in node.targets:          # any assignment counts as a variable (for shadowing)
+                if isinstance(t, ast.Name):
+                    st.name, st.target_span = t.id, self.span(t)
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             call = node.value
         elif (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
@@ -158,6 +174,7 @@ class Script:
         st.args = self._args(call, op_params(fname))
         st.call_end = self.span(call)[1] - 1
         st.refs = {n.id for n in ast.walk(call) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        st.strs = tuple(n.value for n in ast.walk(call) if isinstance(n, ast.Constant) and isinstance(n.value, str))
         return st
 
     def _args(self, call, names):
@@ -201,7 +218,7 @@ def auto_names(script: Script) -> list[str]:
     counters: dict[str, int] = {}
     out = []
     for s in script.features():
-        if s.name:
+        if s.name and not s.shadowed:
             out.append(s.name)
             continue
         n = counters.get(s.op, 0)
@@ -217,7 +234,7 @@ def auto_names(script: Script) -> list[str]:
 
 # Steps that make a new solid body get body1, body2... (a box rarely stays a box for long);
 # everything else is named after its operation (fillet1, pattern1, profile1...).
-NEW_BODY = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "copy", "mirror", "split"}
+NEW_BODY = {"box", "cylinder", "cone", "sphere", "torus", "coil", "polygon", "copy", "mirror", "split", "import_file"}
 
 
 def default_base(op: str, args: dict | None = None) -> str:
@@ -350,21 +367,32 @@ def set_args(text: str, name: str, changes: dict) -> str:
     return text
 
 
+def _name_pattern(name):
+    """A feature's name used in a face or edge name string: "lug.end", "lug_2.+Z", "f1(+X+Z)"."""
+    return re.compile(r"(?<![\w.])" + re.escape(name) + r"(?=(_\d+)?[.(|#])")
+
+
 def dependents(text: str, name: str) -> list[str]:
-    """Features after `name` whose statement reads the variable `name` (transitively)."""
+    """Features after `name` that use it (transitively): they read the variable that holds it
+    (until the variable is assigned again), or name its faces in a string ("lug.end")."""
     sc = Script(text)
     names = auto_names(sc)
     feats = sc.features()
     if name not in names:
         raise EditError(f"no feature '{name}'")
     i = names.index(name)
-    gone = {name}
+    gone_vars = {feats[i].name} if feats[i].name else set()
+    gone_names = [name]
     out = []
     for n, st in zip(names[i + 1:], feats[i + 1:]):
-        if st.refs & gone:
+        hit = bool(st.refs & gone_vars) or any(_name_pattern(g).search(x) for g in gone_names for x in st.strs)
+        if hit:
             out.append(n)
+            gone_names.append(n)
             if st.name:
-                gone.add(st.name)
+                gone_vars.add(st.name)
+        elif st.name:
+            gone_vars.discard(st.name)          # the variable now holds something else
     return out
 
 
@@ -385,27 +413,79 @@ def delete_feature(text: str, name: str, cascade: bool = False) -> str:
     return text
 
 
-def rename_feature(text: str, old: str, new: str) -> str:
-    """Rename a feature everywhere: its variable, every use, and face names in strings
-    ("old.side", "old_2.+Z", "old(+X+Z)")."""
+def rename_feature(text: str, old: str, new: str, intent: bool = False) -> str:
+    """Rename a feature everywhere: its variable, every use of it, and face names in strings
+    ("old.side", "old_2.+Z", "old(+X+Z)"). Uses of its variable are renamed only while the
+    variable still holds this feature (up to where it is assigned again).
+    intent: for a step whose variable is assigned again later (see fix_names), strings written
+    with that variable's name before then ("extrude1.end") are taken to mean this step too."""
     sc = Script(text)
     check_name(sc, new, allow=old)
     st = _feature_stmt(sc, old)
     edits = []
-    if st.name is None:
+    stmts = sc.stmts
+    i = stmts.index(st)
+    var = st.name
+    if var is None:
         edits.append((st.start + (len(text[st.start:]) - len(text[st.start:].lstrip())), None, f"{new} = "))
-    pat = re.compile(r"(?<![\w.])" + re.escape(old) + r"(?=(_\d+)?[.(|#])")
+        scope = []
+    else:
+        edits.append((st.target_span[0], st.target_span[1], new))
+        scope = []
+        for later in stmts[i + 1:]:
+            scope.append(later)
+            if later.name == var:
+                break
+    pats = [_name_pattern(old)]
+    pats_scoped = [_name_pattern(var)] if intent and st.shadowed and var else []
+    def in_scope(pos):
+        return any(x.start <= pos < _line_end(text, x.end) for x in scope)
+
     for node in ast.walk(sc.tree):
-        if isinstance(node, ast.Name) and node.id == old:
-            s, e = sc.span(node)
-            edits.append((s, e, new))
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and pat.search(node.value):
-            s, e = sc.span(node)
-            raw = text[s:e]
-            edits.append((s, e, pat.sub(new, raw)))
-    for s, e, v in sorted(edits, key=lambda x: x[0], reverse=True):
-        text = text[:s] + v + text[s if e is None else e:]
+        if isinstance(node, ast.Name) and var is not None and node.id == var and isinstance(node.ctx, ast.Load):
+            s_, e_ = sc.span(node)
+            if in_scope(s_):
+                edits.append((s_, e_, new))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            s_, e_ = sc.span(node)
+            raw = text[s_:e_]
+            out = raw
+            for pt in pats:
+                out = pt.sub(new, out)
+            if pats_scoped and in_scope(s_):
+                for pt in pats_scoped:
+                    out = pt.sub(new, out)
+            if out != raw:
+                edits.append((s_, e_, out))
+    for s_, e_, v in sorted(edits, key=lambda x: x[0], reverse=True):
+        text = text[:s_] + v + text[s_ if e_ is None else e_:]
     return text
+
+
+def shadowed_steps(text: str) -> list[dict]:
+    """Steps whose variable is assigned again later: [{name (what the step is called),
+    variable, line, again (the line that reuses the variable)}]."""
+    sc = Script(text)
+    if sc.error:
+        return []
+    out = []
+    for n, st in zip(auto_names(sc), sc.features()):
+        if st.shadowed:
+            again = next(x.line for x in sc.stmts[sc.stmts.index(st) + 1:] if x.name == st.name)
+            out.append({"name": n, "variable": st.name, "line": st.line, "again": again})
+    return out
+
+
+def fix_names(text: str) -> str:
+    """Give each step whose variable is reused later a name of its own (the automatic name the
+    app already shows), so every step has one name, as written. Face names written as
+    "variable.face" between the step and the reuse are taken to mean that step."""
+    for _ in range(100):
+        sh = shadowed_steps(text)
+        if not sh:
+            return text
+        text = rename_feature(text, sh[0]["name"], sh[0]["name"], intent=True)
+    raise EditError("could not untangle the reused names")
 
 
 def move_feature(text: str, name: str, after: str | None) -> str:
@@ -631,7 +711,8 @@ def describe(text: str) -> dict:
     feats = []
     for n, st in zip(names, sc.features()):
         feats.append({"name": n, "op": st.op, "line": st.line, "end_line": st.end_line,
-                      "assigned": st.name is not None,
+                      "assigned": st.name is not None and not st.shadowed, "variable": st.name,
                       "args": {a.key: a.text for a in st.args}, "creates": st.op in CREATES})
     return {"ok": True, "gui": sc.gui_ok, "blockers": sc.blockers(), "features": feats,
+            "shadowed": shadowed_steps(text),
             "params": param_values(text), "param_info": param_info(text)}

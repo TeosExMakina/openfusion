@@ -151,7 +151,12 @@ def test_watch_server_serves_rebuilds_and_tries_parameters(part, capsys):
         assert w.version > v0 + 1 and w.result.params["w"] == 12        # the trial value still applies
         # a broken script is reported, not fatal
         part.write_text("from openfusion import *\nthis is not python\n")
-        assert w.poll() and w.result.script_error
+        os.utime(part, ns=(time.time_ns(), time.time_ns() + 2 * 10**9))
+        for _ in range(100):                     # the polling loop or this poll picks it up, whichever is first
+            if w.poll() or w.result.script_error:
+                break
+            time.sleep(0.05)
+        assert w.result.script_error
         part.unlink()
         assert w.poll() is False
     finally:

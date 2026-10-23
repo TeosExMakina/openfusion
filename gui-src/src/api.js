@@ -3,18 +3,25 @@ export class ApiError extends Error {
   constructor(msg, data) { super(msg); this.data = data || {}; }
 }
 
-export async function get(path) {
-  const r = await fetch(path, { cache: "no-store" });
-  const d = await r.json();
+// The server always answers with JSON, errors included. A request that gets no answer at all
+// (the server stopped, or crashed) says so plainly instead of the browser's "Load failed".
+async function call(path, init) {
+  let r;
+  try { r = await fetch(path, init); } catch (e) {
+    throw new ApiError("No answer from the OpenFusion server (is it still running?). Your file is saved; reopen it to carry on.", { offline: true });
+  }
+  let d;
+  try { d = await r.json(); } catch (e) { d = { error: `The server sent an unreadable answer (${r.status} ${r.statusText})` }; }
   if (!r.ok) throw new ApiError(d.error || r.statusText, d);
   return d;
 }
 
+export async function get(path) {
+  return call(path, { cache: "no-store" });
+}
+
 export async function post(path, body) {
-  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
-  const d = await r.json();
-  if (!r.ok) throw new ApiError(d.error || r.statusText, d);
-  return d;
+  return call(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 }
 
 export const $ = (id) => document.getElementById(id);

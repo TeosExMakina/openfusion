@@ -9,6 +9,8 @@ import { BODY_TOOLS, GROUPS, ICONS, IS_MAC, OPS_MOD, OP_TO_TOOL, TOOLS, VIEW_KEY
 import { ScriptEditor } from "./editor.js";
 import { ExportPanel, quickExport } from "./exporter.js";
 import { ParamsPanel } from "./params.js";
+import { AttributesPanel } from "./attrs.js";
+import { DocumentsPanel } from "./docs.js";
 
 const IDLE_HINT = "Click a face or edge to select it; double-click selects the body. Drag a box to select (→ inside, ← touching). Right-drag orbits, two fingers pan, pinch or wheel zooms.";
 
@@ -62,6 +64,7 @@ class App {
     if (!this.dialog) this.vp.setScene(st.scene, { keepCamera: !first });
     this.renderBodies(); this.renderParams(); this.renderTimeline();
     if (this.paramsPanel) this.paramsPanel.render();
+    if (this.attrs && !this.dialog) this.attrs.render();
     const undoKey = IS_MAC ? "⌘Z" : "Ctrl+Z";
     $("undo").disabled = !st.undo; $("undo").title = st.undo ? `Undo ${st.undo} (${undoKey})` : "Nothing to undo";
     $("redo").disabled = !st.redo; $("redo").title = st.redo ? `Redo ${st.redo} (⇧${undoKey})` : "Nothing to redo";
@@ -69,6 +72,11 @@ class App {
     const d = st.desc, sc = st.scene;
     if (!d.ok) this.banner(`The script has a syntax error (${d.error}). Showing the last version that worked until you fix it in the script pane.`, true);
     else if (sc.script_error) this.banner(`The script stopped at line ${sc.script_error_line}: ${sc.script_error}`, true);
+    else if (d.shadowed && d.shadowed.length) {
+      const sh = d.shadowed[0], more = d.shadowed.length > 1 ? ` (and ${d.shadowed.length - 1} more)` : "";
+      this.banner(`The name ${sh.variable} is used for two steps (lines ${sh.line} and ${sh.again})${more}. The script keeps only the second, so the first one shows as ${sh.name}, and "${sh.variable}.…" face names point at the second.`,
+        true, { label: `Name it ${sh.name}`, run: () => this.action("/api/fix_names", {}).then(() => toast("Each step has its own name now")).catch(() => {}) });
+    }
     else if (!d.gui) this.banner(`Code-only mode: line ${d.blockers.join(", ")} uses code the timeline cannot show (a loop or function). New features still work; edit existing ones in the script.`);
     else this.banner(null);
     if (this.editor) this.editor.load(st.text, st.hash);
@@ -143,7 +151,11 @@ class App {
       const out = await post(path, body);
       if (out.state) this.setState(out.state);
       return out;
-    } catch (e) { toast(e.message, true); throw e; }
+    } catch (e) {
+      toast(e.message, true);
+      if (e.data && e.data.internal) this.refresh().catch(() => {});     // the server rebuilt from scratch
+      throw e;
+    }
   }
 
   // Body ids become script expressions: pattern copies are written group[k].
@@ -162,7 +174,18 @@ class App {
   featureOp(name) { return this.state.desc.features.find((f) => f.name === name)?.op; }
   featureArgs(name) { return this.state.desc.features.find((f) => f.name === name)?.args || {}; }
 
-  banner(msg, err = false) { const b = $("banner"); b.hidden = !msg; if (msg) { b.textContent = msg; b.className = "banner" + (err ? " err" : ""); } }
+  // a message across the top of the view, with an optional button that fixes the problem
+  banner(msg, err = false, fix = null) {
+    const b = $("banner"); b.hidden = !msg;
+    if (!msg) return;
+    b.className = "banner" + (err ? " err" : "");
+    b.textContent = msg;
+    if (fix) {
+      const btn = document.createElement("button"); btn.type = "button"; btn.textContent = fix.label;
+      btn.addEventListener("click", () => fix.run());
+      b.append(" ", btn);
+    }
+  }
   setPerf(ms) { if (ms) $("perf").textContent = `build ${ms.build} ms · mesh ${ms.mesh} ms`; }
   setHint(text) { $("hover").textContent = text || ""; }
 
@@ -228,7 +251,9 @@ class App {
     }
     if (t.sketch) {
       const face = this.selection.find((s) => s.kind === "face" && s.entry && s.entry.kind === "plane");
-      if (face && !opts.edit) {
+      const org = this.selection.find((s) => s.kind === "origin");
+      if (org && !opts.edit) opts.plane = { base: { ref: org.plane === "XY" ? null : org.ref, frame: org.frame } };
+      else if (face && !opts.edit) {
         const snaps = this.vp.snapCandidates({ face: face.entry, body: face.body, label: face.label, point: face.point });
         const c = snaps.find((x) => x.kind === "center") || snaps[0];
         opts.plane = { base: { ref: this.fixRef(c.ref, true), frame: c.frame } };
@@ -240,7 +265,7 @@ class App {
     if (!opts.edit) {
       const preset = {}, frames = {};
       const sel = this.selection;
-      const bodies = [...new Set(sel.map((s) => s.body))];
+      const bodies = [...new Set(sel.filter((s) => s.body).map((s) => s.body))];
       const fields = t.fields || [];
       const has = (key) => fields.some((f) => f.key === key);
       const bodyField = fields.find((f) => f.kind === "body" && !f.hidden && !f.noAuto);
@@ -253,6 +278,11 @@ class App {
       }
       const face = sel.find((s) => s.kind === "face");
       if (has("face") && face) preset.face = this.fixRef(face.ref, true);
+      const org = sel.find((s) => s.kind === "origin");
+      if (org) {                                   // an origin plane feeds the first anchor or plane field
+        const af = fields.find((f) => f.kind === "anchor" && !f.noAuto);
+        if (af) { preset[af.key] = af.planes ? q(org.plane) : org.ref; frames[af.key] = org.frame; }
+      }
       // selected faces (or profiles) feed face-list fields; a single-face field takes one only
       // when the tool has no list (Draft's faces come from the selection, its plane is picked)
       const isProfile = (id) => this.vp.body(id)?.kind === "profile";
@@ -308,6 +338,8 @@ class App {
 
   // ------------------------------------------------------------------ viewport selection
   pickSel(ev) {
+    const org = this.vp.pickOrigin(ev);
+    if (org) return { kind: "origin", body: null, ref: org.ref, plane: org.plane, frame: org.frame, key: "origin:" + org.plane };
     const f = this.filter;
     const hit = f === "auto" ? this.vp.pickAuto(ev) : this.vp.pick(ev, f);
     if (!hit) return null;
@@ -327,11 +359,15 @@ class App {
         return;
       }
       const s = this.pickSel(ev);
+      const hb = s ? s.body : null;
+      if (hb !== this.hoverBody) { this.hoverBody = hb; this.markBodies(); }
+      const selOrigin = this.selection.find((x) => x.kind === "origin");
+      this.vp.setOriginHover(s && s.kind === "origin" ? s.plane : selOrigin ? selOrigin.plane : null);
       if (!s) { this.vp.setHover(null); this.showTip(null); this.setHint(this.dialog ? "" : IDLE_HINT); return; }
-      this.vp.setHover(s.key);
+      this.vp.setHover(s.kind === "origin" ? null : s.key);
       this.showTip(s.kind === "body" ? this.exprFor(s.body, true) : this.fixRef(s.ref, true), ev);
     });
-    canvas.addEventListener("pointerleave", () => { this.vp.setHover(null); this.showTip(null); });
+    canvas.addEventListener("pointerleave", () => { this.vp.setHover(null); this.showTip(null); if (this.hoverBody) { this.hoverBody = null; this.markBodies(); } });
     // Left: click picks, drag draws a selection box. Right: drag orbits (the orbit controls), a
     // click without dragging opens the body menu. Middle drag pans.
     canvas.addEventListener("pointerdown", (ev) => {
@@ -358,11 +394,13 @@ class App {
       if (this.exporter) { this.exporter.viewClick(ev); return; }
       if (this.dialog) { if (ev.pointerType !== "mouse") this.dialog.hover(ev); this.dialog.click(ev); return; }
       const s = this.pickSel(ev);
+      this.unpickStep();
       if (!s) this.selection = [];
       else if (ev.shiftKey || ev.metaKey) this.selection = this.selection.some((x) => x.key === s.key) ? this.selection.filter((x) => x.key !== s.key) : [...this.selection, s];
       else this.selection = [s];
       this.vp.setSelected(this.selection.map((x) => x.key));
-      this.vp.showLocalGrid(s && s.kind === "face" && s.entry && s.entry.kind === "plane" ? this.vp.snapCandidates({ face: s.entry, body: s.body, label: s.label, point: s.point })[0].frame : null);
+      this.vp.showLocalGrid(s && s.kind === "origin" ? s.frame
+        : s && s.kind === "face" && s.entry && s.entry.kind === "plane" ? this.vp.snapCandidates({ face: s.entry, body: s.body, label: s.label, point: s.point })[0].frame : null);
       this.renderSelection();
     });
     canvas.addEventListener("dblclick", (ev) => {
@@ -411,7 +449,7 @@ class App {
 
   // ------------------------------------------------------------------ selection readout
   selectionItems() {
-    return this.selection.map((s) => {
+    return this.selection.filter((s) => s.kind !== "origin").map((s) => {
       if (s.kind === "body") return { kind: "body", body: s.body, name: s.body };
       if (s.kind === "face") {
         const m = this.vp.faceMeshes.find((x) => x.userData.ref === s.ref);
@@ -428,8 +466,8 @@ class App {
   updateSelInfo() {
     clearTimeout(this._selTimer);
     const box = $("selinfo");
-    if (!this.selection.length) { box.hidden = true; return; }
     const items = this.selectionItems();
+    if (!items.length) { box.hidden = true; return; }
     const key = JSON.stringify(items) + this.version;
     this._selTimer = setTimeout(async () => {
       try {
@@ -460,8 +498,23 @@ class App {
     this.updateSelInfo();
     const n = this.selection.length;
     $("sel").textContent = n ? `Selected: ${this.selection.map((s) => s.kind === "body" ? this.exprFor(s.body, true) : this.fixRef(s.ref, true)).join(", ")}` : "";
-    document.querySelectorAll(".bodies li").forEach((li) => li.classList.toggle("sel", this.selection.some((s) => s.kind === "body" && s.body === li.dataset.body)));
+    this.markBodies(true);
     if (n === 1) this.copy(this.selection[0].kind === "body" ? this.exprFor(this.selection[0].body, true) : this.fixRef(this.selection[0].ref, true), false);
+  }
+
+  // The bodies list shows what is selected: the whole row for a selected body, a lighter mark for
+  // the body a selected face or edge belongs to, and the body under the cursor in the view.
+  markBodies(scroll = false) {
+    let first = null;
+    document.querySelectorAll(".bodies li[data-body]").forEach((li) => {
+      const id = li.dataset.body;
+      const whole = this.selection.some((s) => s.kind === "body" && s.body === id);
+      const part = !whole && this.selection.some((s) => s.body === id);
+      li.classList.toggle("sel", whole); li.classList.toggle("sel-part", part);
+      li.classList.toggle("hov", this.hoverBody === id);
+      if ((whole || part) && !first) first = li;
+    });
+    if (scroll && first) first.scrollIntoView({ block: "nearest" });
   }
 
   copy(text, announce = true) {
@@ -483,6 +536,7 @@ class App {
       ul.append(li);
       if (this.showRemoved) for (const b of gone) ul.append(this.bodyRow(b));
     }
+    this.markBodies();
   }
 
   bodyRow(b) {
@@ -497,6 +551,7 @@ class App {
     li.addEventListener("click", () => {
       if (this.exporter && this.exporter.toggle(b.id)) return;
       if (this.dialog && this.dialog.takeBody(b.id)) return;
+      this.unpickStep();
       this.selection = [{ kind: "body", body: b.id, ref: b.id, key: "body:" + b.id }];
       this.vp.setSelected(this.selection.map((s) => s.key)); this.renderSelection();
     });
@@ -518,6 +573,7 @@ class App {
     const exportable = b.role !== "removed";
     this.contextMenu(id, [
       [`Edit ${creator}`, () => this.editFeature(creator)],
+      ["View attributes", () => this.openAttrs(id)],
       ["Move", () => { sel(); this.openTool("move"); }],
       ["Place", () => this.openTool("place")],
       ["Place on bed", () => { sel(); this.openTool("place_on_bed"); }],
@@ -558,6 +614,25 @@ class App {
     this.paramsPanel = new ParamsPanel(this);
     $("params-btn").setAttribute("aria-pressed", "true");
   }
+
+  // the points, edges and faces a body defines (right-click a body: View attributes)
+  openAttrs(id) {
+    this.closeMenus();
+    if (this.attrs) this.attrs.close();
+    this.attrs = new AttributesPanel(this, id);
+  }
+
+  // opening, creating, renaming and copying parts (click the file name, or ⌘⇧O)
+  openDocs() {
+    this.closeMenus();
+    if (this.state?.start && !this.state.app) return;
+    if (this.docs) this.docs.close();
+    this.docs = new DocumentsPanel(this);
+  }
+
+  closeDocs() { if (this.docs) { this.docs.close(); this.docs = null; } }
+
+  closeAttrs() { if (this.attrs) { this.attrs.close(); this.attrs = null; } }
 
   closeParams() {
     if (!this.paramsPanel) return;
@@ -639,29 +714,32 @@ class App {
   }
 
   // ------------------------------------------------------------------ timeline
+  // The timeline: one chip per step, in order. Click a chip to pick it (its bodies get selected;
+  // Delete deletes the step), double-click to edit, right-click for more. The marker (the bar)
+  // is where new steps go and how far the model is built: drag it between chips to roll back,
+  // drag it to the end (or click it) to see everything again.
   renderTimeline(previewName = null, previewResult = null) {
     const ol = $("timeline"); ol.innerHTML = "";
     const res = Object.fromEntries((this.state.scene.timeline || []).map((r) => [r.name, r]));
     const feats = this.state.desc.features;
     const marker = this.state.marker;
+    if (this.pickedStep && !feats.some((f) => f.name === this.pickedStep)) this.pickedStep = null;
     let after = false;
-    const markerEl = () => {
-      const m = document.createElement("li"); m.className = "marker"; m.title = "Timeline marker: new features go here. Click to move it to the end.";
-      m.addEventListener("click", () => this.action("/api/marker", { name: null }).catch(() => {}));
-      return m;
-    };
     if (!feats.length) ol.innerHTML = `<li class="end">Your features appear here, in order.</li>`;
     for (const f of feats) {
       const r = res[f.name];
       const li = document.createElement("li");
-      li.className = "chip " + (r ? r.status : "") + (after ? " after-marker" : "") + (this.dialog && this.dialog.edit === f.name ? " editing" : "");
+      li.className = "chip " + (r ? r.status : "") + (after ? " after-marker" : "") + (this.dialog && this.dialog.edit === f.name ? " editing" : "")
+        + (this.pickedStep === f.name ? " picked" : "");
       li.dataset.name = f.name;
       li.innerHTML = `<span class="op">${esc(f.op.replace("_", " "))}</span><span class="nm">${esc(f.name)}</span>`;
       const msg = r ? (r.message || r.warnings.join("; ")) : "after the marker, not built";
-      li.title = `${f.name}: ${f.op}, line ${f.line}${r ? ` · ${r.status}${r.cached ? " (cached)" : ` · ${r.ms.toFixed(1)} ms`}` : ""}${msg ? "\n" + msg : ""}\nDouble-click to edit, right-click for more.`;
+      li.title = `${f.name}: ${f.op}, line ${f.line}${r ? ` · ${r.status}${r.cached ? " (cached)" : ` · ${r.ms.toFixed(1)} ms`}` : ""}${msg ? "\n" + msg : ""}\nClick to pick (Delete deletes it), double-click to edit, right-click for more.`;
       li.addEventListener("click", () => {
         if (this.dialog && (f.op === "pattern_rect" || f.op === "pattern_circ") && this.dialog.takeGroup(f.name)) return;
         if (this.dialog && f.creates && this.dialog.takeBody(f.name)) return;
+        this.pickedStep = f.name;
+        ol.querySelectorAll(".chip").forEach((c) => c.classList.toggle("picked", c.dataset.name === f.name));
         const ids = this.state.scene.bodies.filter((b) => b.history.includes(f.name)).map((b) => ({ kind: "body", body: b.id, ref: b.id, key: "body:" + b.id }));
         this.selection = ids; this.vp.setSelected(ids.map((s) => s.key)); this.renderSelection();
         if (this.editor && !$("editor-pane").hidden) this.editor.showLines(f.line, f.end_line);
@@ -669,10 +747,64 @@ class App {
       li.addEventListener("dblclick", () => this.editFeature(f.name));
       li.addEventListener("contextmenu", (e) => { e.preventDefault(); this.featureMenu(f, e.clientX, e.clientY); });
       ol.append(li);
-      if (f.name === marker) { ol.append(markerEl()); after = true; if (previewName) ol.append(this.previewChip(previewName, previewResult)); }
+      if (f.name === marker) { ol.append(this.markerEl()); after = true; if (previewName) ol.append(this.previewChip(previewName, previewResult)); }
     }
     if (previewName && !marker) ol.append(this.previewChip(previewName, previewResult));
-    ol.scrollLeft = ol.scrollWidth;
+    if (feats.length && !marker) ol.append(this.markerEl());
+    ol.scrollLeft = marker ? ol.scrollLeft : ol.scrollWidth;
+  }
+
+  markerEl() {
+    const m = document.createElement("li"); m.className = "marker" + (this.state.marker ? "" : " at-end");
+    m.title = this.state.marker ? "Rolled back: the model is built up to here and new steps go here. Drag it to move it; click it to go to the end."
+      : "The marker: drag it back between steps to roll back the model there.";
+    m.setAttribute("role", "separator"); m.setAttribute("aria-label", "Timeline marker");
+    m.addEventListener("pointerdown", (e) => this.dragMarker(e, m));
+    return m;
+  }
+
+  // Drag the marker along the timeline; it lands after the step left of where it is dropped.
+  dragMarker(e, m) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const ol = $("timeline");
+    const chips = [...ol.querySelectorAll(".chip:not(.preview)")];
+    const x0 = e.clientX;
+    let moved = false, target = undefined;
+    const ghost = document.createElement("li"); ghost.className = "marker ghost";
+    const at = (x) => {         // the step the marker would follow: the last chip whose middle is left of x
+      let name = chips.length ? chips[0].dataset.name : null;
+      for (const c of chips) { const r = c.getBoundingClientRect(); if (r.left + r.width / 2 < x) name = c.dataset.name; }
+      const last = chips[chips.length - 1], lr = last && last.getBoundingClientRect();
+      return last && x > lr.left + lr.width / 2 && name === last.dataset.name ? null : name;
+    };
+    const move = (ev) => {
+      if (!moved && Math.abs(ev.clientX - x0) < 4) return;
+      moved = true; m.classList.add("dragging");
+      target = at(ev.clientX);
+      const after = target === null ? chips[chips.length - 1] : chips.find((c) => c.dataset.name === target);
+      if (after) after.after(ghost);
+      const r = ol.getBoundingClientRect();         // scroll along when dragging at the edges
+      if (ev.clientX > r.right - 30) ol.scrollLeft += 12; else if (ev.clientX < r.left + 30) ol.scrollLeft -= 12;
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      ghost.remove(); m.classList.remove("dragging");
+      if (!moved) { if (this.state.marker) this.setMarker(null); return; }
+      if (target !== undefined && target !== this.state.marker) this.setMarker(target);
+    };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+  }
+
+  unpickStep() {
+    if (!this.pickedStep) return;
+    this.pickedStep = null;
+    document.querySelectorAll("#timeline .chip.picked").forEach((c) => c.classList.remove("picked"));
+  }
+
+  setMarker(name) {
+    if (this.dialog) this.closeDialog();
+    return this.action("/api/marker", { name }).then(() => toast(name ? `Rolled back to ${name}` : "Showing every step")).catch(() => {});
   }
 
   previewChip(name, r) {
@@ -688,8 +820,10 @@ class App {
     const gui = this.state.desc.gui;
     this.contextMenu(f.name, [
       ["Edit", () => this.editFeature(f.name)],
+      this.vp.body(f.name) ? ["View attributes", () => this.openAttrs(f.name)] : undefined,
       gui ? ["Rename…", () => this.rename(f.name)] : undefined,
-      gui ? ["Roll back to here", () => this.action("/api/marker", { name: f.name }).catch(() => {})] : undefined,
+      gui ? ["Roll back to here", () => this.setMarker(f.name)] : undefined,
+      gui && this.state.marker ? ["Go to the end", () => this.setMarker(null)] : undefined,
       ["Show in script", () => { this.toggleEditor(true); this.editor.showLines(f.line, f.end_line); }],
       null,
       gui ? ["Delete…", () => this.deleteFeature(f.name), true] : undefined,
@@ -732,7 +866,7 @@ class App {
       this.filter = b.dataset.filter;
       document.querySelectorAll("[data-filter]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
     }));
-    for (const k of ["anchors", "ghosts", "grid"]) {
+    for (const k of ["anchors", "ghosts", "grid", "origin"]) {
       const b = $("t-" + k);
       b.setAttribute("aria-pressed", String(this.vp.show[k]));
       b.addEventListener("click", () => this.toggleShow(k));
@@ -744,7 +878,7 @@ class App {
     $("script-btn").addEventListener("click", () => this.toggleEditor());
     $("help-btn").addEventListener("click", () => this.toggleHelp());
     $("export-btn").addEventListener("click", (e) => { e.stopPropagation(); this.exporter ? this.closeExport() : this.openExport(); });
-    $("file").addEventListener("click", (e) => { e.stopPropagation(); this.fileMenu(); });
+    $("file").addEventListener("click", (e) => { e.stopPropagation(); this.openDocs(); });
     $("params-btn").addEventListener("click", (e) => { e.stopPropagation(); this.paramsPanel ? this.closeParams() : this.openParams(); });
     $("params-btn").title = `Parameters: names for sizes, used as P.name (${keyLabel("Shift+V")})`;
     $("params-edit").addEventListener("click", () => this.openParams());
@@ -763,7 +897,7 @@ class App {
   toggleShow(k) {
     this.vp.show[k] = !this.vp.show[k];
     $("t-" + k).setAttribute("aria-pressed", String(this.vp.show[k]));
-    if (k === "grid") this.vp.gridKey = ""; else this.vp.setScene(this.vp.data);
+    if (k === "grid") this.vp.gridKey = ""; else if (k === "origin") this.vp.originKey = null; else this.vp.setScene(this.vp.data);
   }
 
   toggleEditor(force) {
@@ -788,11 +922,11 @@ class App {
       <div class="help-cols">
         <section><h2>Operations</h2><table>${rows(ops.map(([, t]) => [keyLabel(t.key) + (t.alt ? ` or ${keyLabel(t.alt)}` : ""), t.label]))}</table></section>
         <section><h2>In a sketch</h2><table>${rows([...SKETCH_DRAW.map((t) => [t.key.replace("Shift+", "⇧"), t.label]), ["X", "Construction"],
-          ...SKETCH_RULES.map((r) => [r.key.replace("Shift+", "⇧"), r.label]), ["Delete", "Delete the selection"]])}</table></section>
+          ...SKETCH_RULES.map((r) => [r.key.replace("Shift+", "⇧"), r.label]), ["Delete", "Delete the selection"], ["0-9 while drawing", "Type a size (Tab: next box, Enter: place)"]])}</table></section>
         <section><h2>View</h2><table>${rows(VIEW_KEYS.map(([k, , l]) => [viewKeyLabel(k), l]))}</table>
           <h2>Mouse and trackpad</h2><table>${rows([["Click", "Select a face or edge (double-click: the body)"], ["Drag →", "Box: select what is inside"], ["Drag ←", "Box: select what it touches"],
             ["Right-drag", "Orbit"], ["Right-click", "Body menu"], ["Two fingers", "Pan"], ["⇧ + two fingers", "Orbit"], ["Pinch / wheel", "Zoom at the pointer"], ["Middle-drag", "Pan"]])}</table>
-          <h2>Everywhere</h2><table>${rows([[cmd + "Z", "Undo"], ["⇧" + cmd + "Z", "Redo"], [cmd + "E", "Script pane"], [cmd + "S", "Save the script pane"],
+          <h2>Everywhere</h2><table>${rows([[cmd + "Z", "Undo"], ["⇧" + cmd + "Z", "Redo"], [cmd + "E", "Script pane"], [cmd + "S", "Save the script pane"], ["⇧" + cmd + "O", "Documents: open, new, rename, save a copy"], ["⇧" + cmd + "S", "Save a copy"],
             ["Enter", "OK in a tool"], ["Esc", "Cancel / clear selection"], ["Tab", "Next field (over the view: next snap point)"], ["Delete", "Delete the selected body's feature"], [keyLabel("Shift+E"), "Export"], [keyLabel("Shift+V"), "Parameters"], ["?", "This sheet"]])}</table></section>
       </div></div>`;
     $("help").addEventListener("click", (e) => { if (e.target.id === "help" || e.target.id === "help-close") this.toggleHelp(false); });
@@ -826,8 +960,18 @@ class App {
       const inField = ev.target.closest && ev.target.closest("input, select, textarea, .cm-editor");
       const cmd = IS_MAC ? ev.metaKey : ev.ctrlKey;
       const name = this.comboName(ev);
-      if (cmd && ev.key.toLowerCase() === "s") { ev.preventDefault(); if (this.editor) this.editor.save(); return; }
+      if (cmd && !ev.shiftKey && ev.key.toLowerCase() === "s") {
+        ev.preventDefault();
+        if (this.editor && !$("editor-pane").hidden) this.editor.save(); else toast("Saved: OpenFusion writes every change to the file as you make it");
+        return;
+      }
       if (cmd && ev.key.toLowerCase() === "e") { ev.preventDefault(); if (!this.state?.start) this.toggleEditor(); return; }
+      if (cmd && ev.shiftKey && ev.key.toLowerCase() === "o") { ev.preventDefault(); this.docs ? this.closeDocs() : this.openDocs(); return; }
+      if (cmd && ev.shiftKey && ev.key.toLowerCase() === "s" && this.state && !this.state.start) {
+        ev.preventDefault();
+        if (this.state.app) this.fileAction("save_as", { choose: true, open: true }); else this.openDocs();
+        return;
+      }
       if (cmd && this.state?.app && !ev.shiftKey && (ev.key.toLowerCase() === "n" || ev.key.toLowerCase() === "o")) {
         ev.preventDefault(); this.fileAction(ev.key.toLowerCase() === "n" ? "new" : "open"); return;
       }
@@ -850,9 +994,11 @@ class App {
       if (this.dialog && !inCode && this.dialog.key(ev)) return;
       if (ev.key === "Escape") {
         if (!$("help").hidden) return this.toggleHelp(false);
+        if (this.docs) { this.closeDocs(); return; }
         if (this.paramsPanel) { this.closeParams(); return; }
+        if (this.attrs && !this.dialog) { this.closeAttrs(); return; }
         if (this.exporter) { this.closeExport(); this.closeMenus(); return; }
-        if (this.dialog) this.closeDialog(); else { this.selection = []; this.vp.setSelected([]); this.vp.showLocalGrid(null); this.renderSelection(); }
+        if (this.dialog) this.closeDialog(); else { this.unpickStep(); this.selection = []; this.vp.setSelected([]); this.vp.showLocalGrid(null); this.renderSelection(); }
         this.closeMenus(); return;
       }
       if (inField) { if (ev.key === "Enter" && this.dialog && ev.target.closest("#dialog")) { ev.preventDefault(); this.dialog.ok(); } return; }
@@ -860,6 +1006,7 @@ class App {
       if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
       if (ev.key === "?") { this.toggleHelp(); return; }
       if (ev.key === "Enter" && this.dialog) { ev.preventDefault(); this.dialog.ok(); return; }
+      if ((ev.key === "Delete" || ev.key === "Backspace") && this.pickedStep) { ev.preventDefault(); this.deleteFeature(this.pickedStep); return; }
       if (ev.key === "Delete" || ev.key === "Backspace") {
         const b = this.selection.find((s) => s.kind === "body");
         if (b) { const body = this.vp.body(b.body); if (body) this.deleteFeature(body.history[0]); }

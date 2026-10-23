@@ -36,10 +36,23 @@ const DRAW = [
   { id: "rect", label: "Rectangle", key: "R", help: "Click one corner, then the opposite corner." },
   { id: "circle", label: "Circle", key: "C", help: "Click the centre, then a point on the rim." },
   { id: "arc", label: "Arc", key: "A", help: "Click the centre, the start, then the end (counterclockwise)." },
+  { id: "ellipse", label: "Ellipse", key: "Shift+E", help: "Click the centre, then a corner of the box around the ellipse (its half-widths along X and Y)." },
   { id: "point", label: "Point", key: "O", help: "Click to place a free point (a centre, a guide)." },
   { id: "project", label: "Project", key: "J", help: "Click edges of the model to bring them into the sketch: fixed, and they follow the model when it changes. Their ends are points you can constrain to." },
   { id: "dim", label: "Dimension", key: "D", help: "Select what to measure first (a line, a circle, two points, a point and a line, two lines), then D." },
 ];
+
+// The type-in boxes shown while drawing (Tab moves between them, Enter places the shape).
+// A typed value is kept (locked) and becomes a dimension; the others follow the cursor.
+const HUD = {
+  line: [["length", "Length"], ["angle", "Angle °"]],
+  rect: [["width", "Width"], ["height", "Height"]],
+  circle: [["diameter", "Diameter"]],
+  ellipse: [["rx", "Half-width X"], ["ry", "Half-width Y"]],
+  arc: [["radius", "Radius"], ["sweep", "Sweep °"]],
+};
+const num = (t) => { const v = String(t).trim(); return /^-?(\d+\.?\d*|\.\d+)$/.test(v) ? Number(v) : v ? { expr: v } : null; };
+const val = (v) => (typeof v === "number" ? v : null);           // a plain number to draw with (expressions: use the cursor)
 
 export class Sketcher {
   constructor(app, opts = {}) {
@@ -49,6 +62,7 @@ export class Sketcher {
     this.solved = null; this.info = null;
     this.tool = "line"; this.construction = false;
     this.sel = []; this.pending = []; this.hoverKey = null; this.cursor = null;
+    this.hud = null; this.tab = "curves"; this.showContents = true;
     this.history = []; this.future = [];
     this.group = new THREE.Group(); this.vp.temp.add(this.group);
     this.labels = document.createElement("div"); this.labels.className = "sk-labels";
@@ -75,6 +89,7 @@ export class Sketcher {
         this.at = src.at; this.spin = src.spin;
         for (const [n, v] of Object.entries(src.points)) this.model.points[n] = Array.isArray(v) ? v.slice() : v;
         for (const [n, v] of Object.entries(src.curves)) this.model.curves[n] = v.slice();
+      for (const v of src.constraints) if (!Array.isArray(v)) throw new Error("each constraint is written (kind, ...), e.g. (\"horizontal\", \"l1\")");
         this.model.cons = src.constraints.map((c) => c.slice());
       } catch (e) { toast(e.message, true); this.app.closeDialog(); return; }
       await this.solve();
@@ -84,10 +99,12 @@ export class Sketcher {
     }
     if (opts.plane) { this.beginOn(opts.plane.base); return; }
     this.stage = "plane";
-    this.app.setHint("Click a flat face to sketch on (or empty space for the bed). Esc cancels.");
+    this.vp.setOriginForced(true);
+    this.app.setHint("Click a flat face or an origin plane (XY, XZ, YZ) to sketch on; empty space is the bed. Esc cancels.");
   }
 
   beginOn(base) {
+    this.vp.setOriginForced(false); this.vp.setOriginHover(null); this.vp.setHover(null);
     this.at = base.ref || null;           // nothing: the world XY plane (the bed)
     this.stage = null;
     this.enterPlane(base.frame);
@@ -163,10 +180,13 @@ export class Sketcher {
       while (a1 <= a0) a1 += 2 * Math.PI;
       return Array.from({ length: 49 }, (_, i) => { const a = a0 + (a1 - a0) * i / 48; return [ctr[0] + r * Math.cos(a), ctr[1] + r * Math.sin(a)]; });
     }
-    if (kind === "spline") {
-      if (info && info.samples) return info.samples;
-      return pts.map((n) => this.pos(n));
+    if (info && info.samples) return info.samples;          // ellipses, parametric curves, splines, projections
+    if (kind === "ellipse") {                                // not solved yet: from the model
+      const ctr = this.pos(c[1]), rx = Number(c[2]) || 1, ry = Number(c[3]) || 1, a = (Number(c[4]) || 0) * Math.PI / 180;
+      return Array.from({ length: 97 }, (_, i) => { const t = i / 96 * 2 * Math.PI, x = rx * Math.cos(t), y = ry * Math.sin(t);
+        return [ctr[0] + x * Math.cos(a) - y * Math.sin(a), ctr[1] + x * Math.sin(a) + y * Math.cos(a)]; });
     }
+    if (kind === "spline") return pts.map((n) => this.pos(n));
     return null;
   }
 
@@ -193,8 +213,11 @@ export class Sketcher {
   // ------------------------------------------------------------------ pointer handling
   hover(ev) {
     if (this.stage === "plane") {
-      const hit = this.vp.pick(ev, "face");
-      this.app.showTip(hit ? "Sketch here" : "Sketch on the bed", ev);
+      const org = this.vp.pickOrigin(ev);
+      this.vp.setOriginHover(org ? org.plane : null);
+      const hit = org ? null : this.vp.pick(ev, "face");
+      this.vp.setHover(hit && hit.face && hit.face.kind === "plane" ? "face:" + hit.ref : null);
+      this.app.showTip(org ? `Sketch on the ${org.plane} plane` : hit ? (hit.face && hit.face.kind === "plane" ? "Sketch on this face" : "Pick a flat face") : "Sketch on the bed (XY)", ev);
       return true;
     }
     if (!this.frame) return true;
@@ -207,6 +230,7 @@ export class Sketcher {
     }
     this.cursor = this.snapped(ev);
     this.hoverKey = this.tool === "select" || this.tool === "dim" ? this.pickAt(ev) : null;
+    this.updateHud();
     const p = this.cursor && this.cursor.p;
     this.app.showTip(p ? `(${fmt(p[0])}, ${fmt(p[1])})${this.cursor.name ? " · " + this.cursor.name : ""}` : null, ev);
     this.render();
@@ -215,6 +239,12 @@ export class Sketcher {
 
   click(ev) {
     if (this.stage === "plane") {
+      const org = this.vp.pickOrigin(ev);
+      if (org) {
+        this.vp.setOriginForced(false); this.vp.setOriginHover(null); this.vp.setHover(null);
+        this.beginOn({ ref: org.plane === "XY" ? null : org.ref, frame: org.frame });
+        return;
+      }
       const hit = this.vp.pick(ev, "face");
       if (hit && hit.face && hit.face.kind !== "plane") { toast("Sketches go on flat faces", true); return; }
       if (hit) {
@@ -243,12 +273,13 @@ export class Sketcher {
       if (!k) { if (!ev.shiftKey) this.sel = []; }
       else if (ev.shiftKey || ev.metaKey || this.tool === "dim") this.sel = this.sel.includes(k) ? this.sel.filter((x) => x !== k) : [...this.sel, k];
       else this.sel = [k];
-      this.render();
+      this.render(); this.refreshSide();
       if (this.tool === "dim" && this.sel.length) this.tryDimension(false);
       return;
     }
     if (!s) return;
-    this.place(s);
+    if (this.pending.length && this.hudLocked()) this.place({ name: null, p: this.hudTarget(s.p) });
+    else this.place(s);
   }
 
   pointerDown(ev) {
@@ -295,11 +326,19 @@ export class Sketcher {
     return n;
   }
 
+  // the locked values in the type-in boxes, as dimension values (numbers or {expr})
+  locks() {
+    const out = {};
+    for (const f of (this.hud && this.hud.fields) || []) if (f.locked && f.value !== null) out[f.key] = f.value;
+    return out;
+  }
+
   place(s) {
-    const t = this.tool;
+    const t = this.tool, L = this.locks();
+    const done = () => this.resetHud();
     if (t === "point") { this.remember(); this.pointFor(s); this.solve(); return; }
     if (t === "line") {
-      if (!this.pending.length) { this.pending = [s]; this.render(); return; }
+      if (!this.pending.length) { this.pending = [s]; this.render(); this.showHud(); return; }
       const a = this.pending[0];
       if (s.name && s.name === a.name) { this.pending = []; this.render(); return; }      // click the last point again: end
       if (Math.hypot(s.p[0] - a.p[0], s.p[1] - a.p[1]) < 1e-9) return;
@@ -309,12 +348,13 @@ export class Sketcher {
       const ang = Math.atan2(Math.abs(s.p[1] - a.p[1]), Math.abs(s.p[0] - a.p[0])) * 180 / Math.PI;
       if (ang < 2.5) this.model.cons.push(["horizontal", ln]);
       else if (ang > 87.5) this.model.cons.push(["vertical", ln]);
+      if (L.length !== undefined) this.model.cons.push(["length", ln, L.length]);
       this.pending = [{ name: pb, p: s.p }];
-      this.solve();
+      done(); this.solve();
       return;
     }
     if (t === "rect") {
-      if (!this.pending.length) { this.pending = [s]; this.render(); return; }
+      if (!this.pending.length) { this.pending = [s]; this.render(); this.showHud(); return; }
       const a = this.pending[0]; this.pending = [];
       if (Math.abs(s.p[0] - a.p[0]) < 1e-9 || Math.abs(s.p[1] - a.p[1]) < 1e-9) return;
       this.remember();
@@ -323,22 +363,35 @@ export class Sketcher {
       const l1 = this.addCurve("l", ["line", p1, p2]), l2 = this.addCurve("l", ["line", p2, p3]);
       const l3 = this.addCurve("l", ["line", p3, p4]), l4 = this.addCurve("l", ["line", p4, p1]);
       this.model.cons.push(["horizontal", l1], ["vertical", l2], ["horizontal", l3], ["vertical", l4]);
-      this.solve();
+      if (L.width !== undefined) this.model.cons.push(["length", l1, L.width]);
+      if (L.height !== undefined) this.model.cons.push(["length", l2, L.height]);
+      done(); this.solve();
       return;
     }
     if (t === "circle") {
-      if (!this.pending.length) { this.pending = [s]; this.render(); return; }
+      if (!this.pending.length) { this.pending = [s]; this.render(); this.showHud(); return; }
       const c = this.pending[0]; this.pending = [];
       const r = Math.hypot(s.p[0] - c.p[0], s.p[1] - c.p[1]);
       if (r < 1e-9) return;
       this.remember();
-      this.addCurve("c", ["circle", this.pointFor(c), round4(r)]);
-      this.solve();
+      const cn = this.addCurve("c", ["circle", this.pointFor(c), round4(r)]);
+      if (L.diameter !== undefined) this.model.cons.push(["diameter", cn, L.diameter]);
+      done(); this.solve();
+      return;
+    }
+    if (t === "ellipse") {
+      if (!this.pending.length) { this.pending = [s]; this.render(); this.showHud(); return; }
+      const c = this.pending[0]; this.pending = [];
+      const rx = Math.abs(s.p[0] - c.p[0]), ry = Math.abs(s.p[1] - c.p[1]);
+      if (rx < 1e-9 || ry < 1e-9) { toast("Drag out a box: the ellipse needs a width and a height", true); return; }
+      this.remember();
+      this.addCurve("e", ["ellipse", this.pointFor(c), L.rx !== undefined ? L.rx : round4(rx), L.ry !== undefined ? L.ry : round4(ry)]);
+      done(); this.solve();
       return;
     }
     if (t === "arc") {
       this.pending.push(s);
-      if (this.pending.length < 3) { this.render(); return; }
+      if (this.pending.length < 3) { this.render(); this.showHud(); return; }
       const [c, a, b] = this.pending; this.pending = [];
       const r = Math.hypot(a.p[0] - c.p[0], a.p[1] - c.p[1]);
       if (r < 1e-9) return;
@@ -346,9 +399,119 @@ export class Sketcher {
       // the end goes on the circle through the start; the arc runs counterclockwise
       const ang = Math.atan2(b.p[1] - c.p[1], b.p[0] - c.p[0]);
       const end = b.name ? b : { p: [c.p[0] + r * Math.cos(ang), c.p[1] + r * Math.sin(ang)] };
-      this.addCurve("a", ["arc", this.pointFor(c), this.pointFor(a), this.pointFor(end)]);
-      this.solve();
+      const an = this.addCurve("a", ["arc", this.pointFor(c), this.pointFor(a), this.pointFor(end)]);
+      if (L.radius !== undefined) this.model.cons.push(["radius", an, L.radius]);
+      done(); this.solve();
     }
+  }
+
+  // ------------------------------------------------------------------ type-in boxes while drawing
+  showHud() {
+    const spec = HUD[this.tool];
+    if (!spec || !this.pending.length) { this.hideHud(); return; }
+    if (this.hud && this.hud.tool === this.tool && this.hud.stage === this.pending.length) { this.placeHud(); return; }
+    this.hideHud();
+    // an arc asks for its radius after the centre, then for its sweep after the start
+    const fields = (this.tool === "arc" ? [spec[this.pending.length - 1]] : spec).map(([key, label]) => ({ key, label, value: null, locked: false }));
+    const el = document.createElement("div");
+    el.className = "sk-hud";
+    el.innerHTML = fields.map((f, i) => `<label>${esc(f.label)}<input data-hud="${i}" spellcheck="false" autocomplete="off" inputmode="decimal"></label>`).join("")
+      + `<span class="sk-hint">type a value · Tab next · Enter places it</span>`;
+    this.labels.appendChild(el);
+    this.hud = { tool: this.tool, stage: this.pending.length, fields, el };
+    el.querySelectorAll("input").forEach((inp) => {
+      inp.addEventListener("input", () => {
+        const f = fields[Number(inp.dataset.hud)];
+        f.value = num(inp.value); f.locked = f.value !== null;
+        inp.classList.toggle("locked", f.locked);
+        this.render();
+      });
+      inp.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Tab") {
+          e.preventDefault();
+          const all = [...el.querySelectorAll("input")], i = all.indexOf(inp);
+          const next = all[(i + (e.shiftKey ? all.length - 1 : 1)) % all.length];
+          next.focus(); next.select();                 // typing replaces the live value shown
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          if (this.cursor) this.place({ name: null, p: this.hudTarget(this.cursor.p) });
+        } else if (e.key === "Escape") {
+          e.preventDefault(); this.pending = []; this.hideHud(); this.render();
+        }
+      });
+    });
+    this.updateHud();
+  }
+
+  hideHud() { if (this.hud) { this.hud.el.remove(); this.hud = null; } }
+  resetHud() { this.hideHud(); if (this.pending.length) this.showHud(); }
+  hudLocked() { return !!(this.hud && this.hud.fields.some((f) => f.locked)); }
+  focusHud(ch) {
+    if (!this.hud) return false;
+    const inp = this.hud.el.querySelector("input");
+    inp.focus(); inp.value = ch; inp.dispatchEvent(new Event("input"));
+    return true;
+  }
+
+  // where the shape's next point goes: the cursor, held to whatever was typed
+  hudTarget(cur) {
+    const a = this.pending[0] && this.pending[0].p;
+    if (!a || !this.hud) return cur;
+    const L = {};
+    for (const f of this.hud.fields) if (f.locked && val(f.value) !== null) L[f.key] = val(f.value);
+    const dx = cur[0] - a[0], dy = cur[1] - a[1], r0 = Math.hypot(dx, dy) || 1, ang0 = Math.atan2(dy, dx);
+    if (this.tool === "line") {
+      const ang = L.angle !== undefined ? L.angle * Math.PI / 180 : ang0, len = L.length !== undefined ? L.length : r0;
+      return [a[0] + len * Math.cos(ang), a[1] + len * Math.sin(ang)];
+    }
+    if (this.tool === "rect") {
+      const sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+      return [a[0] + (L.width !== undefined ? sx * L.width : dx), a[1] + (L.height !== undefined ? sy * L.height : dy)];
+    }
+    if (this.tool === "circle") {
+      const r = L.diameter !== undefined ? L.diameter / 2 : r0;
+      return [a[0] + r * Math.cos(ang0), a[1] + r * Math.sin(ang0)];
+    }
+    if (this.tool === "ellipse") {
+      return [a[0] + (L.rx !== undefined ? (dx < 0 ? -1 : 1) * L.rx : dx), a[1] + (L.ry !== undefined ? (dy < 0 ? -1 : 1) * L.ry : dy)];
+    }
+    if (this.tool === "arc" && this.pending.length === 1) {
+      const r = L.radius !== undefined ? L.radius : r0;
+      return [a[0] + r * Math.cos(ang0), a[1] + r * Math.sin(ang0)];
+    }
+    if (this.tool === "arc" && this.pending.length === 2 && L.sweep !== undefined) {
+      const st = this.pending[1].p, a0 = Math.atan2(st[1] - a[1], st[0] - a[0]), r = Math.hypot(st[0] - a[0], st[1] - a[1]);
+      return [a[0] + r * Math.cos(a0 + L.sweep * Math.PI / 180), a[1] + r * Math.sin(a0 + L.sweep * Math.PI / 180)];
+    }
+    return cur;
+  }
+
+  // the boxes show the live values of the fields not typed in, and sit by the cursor
+  updateHud() {
+    if (!this.hud || !this.cursor || !this.pending.length) return;
+    const a = this.pending[0].p, b = this.hudTarget(this.cursor.p);
+    const live = {
+      length: Math.hypot(b[0] - a[0], b[1] - a[1]), angle: ((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI) + 360) % 360,
+      width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]), diameter: 2 * Math.hypot(b[0] - a[0], b[1] - a[1]),
+      rx: Math.abs(b[0] - a[0]), ry: Math.abs(b[1] - a[1]), radius: Math.hypot(b[0] - a[0], b[1] - a[1]),
+    };
+    if (this.tool === "arc" && this.pending.length === 2) {
+      const st = this.pending[1].p;
+      let sw = (Math.atan2(b[1] - a[1], b[0] - a[0]) - Math.atan2(st[1] - a[1], st[0] - a[0])) * 180 / Math.PI;
+      live.sweep = (sw + 360) % 360;
+    }
+    this.hud.el.querySelectorAll("input").forEach((inp) => {
+      const f = this.hud.fields[Number(inp.dataset.hud)];
+      if (!f.locked && document.activeElement !== inp) inp.value = live[f.key] !== undefined ? fmt(Math.round(live[f.key] * 100) / 100) : "";
+    });
+    this.placeHud();
+  }
+
+  placeHud() {
+    if (!this.hud || !this.cursor) return;
+    const [sx, sy] = this.screen(this.cursor.p);
+    this.hud.el.style.left = `${sx + 18}px`; this.hud.el.style.top = `${sy + 18}px`;
   }
 
   // ------------------------------------------------------------------ constraints and dimensions
@@ -552,6 +715,7 @@ export class Sketcher {
     this.setStatus(dof === 0 ? `Fully constrained · ${nreg} profile region${nreg === 1 ? "" : "s"}`
       : `${dof} degree${dof === 1 ? "" : "s"} of freedom left · ${nreg} profile region${nreg === 1 ? "" : "s"}`, dof === 0 ? "ok" : "");
     this.render();
+    if (!dragging) this.refreshSide();
     return true;
   }
 
@@ -568,7 +732,7 @@ export class Sketcher {
   }
 
   close() {
-    this.closeAsk();
+    this.closeAsk(); this.hideHud();
     this.vp.temp.remove(this.group);
     this.labels.remove();
     this.vp.onFrame = this.vp.onFrame.filter((f) => f !== this.onFrame);
@@ -577,22 +741,24 @@ export class Sketcher {
     this.panel.classList.remove("sk-panel");
     this.panel.hidden = true; this.panel.innerHTML = "";
     this.vp.showLocalGrid(null);
+    this.vp.setOriginForced(false); this.vp.setOriginHover(null);
   }
 
   // ------------------------------------------------------------------ keys
   key(ev) {
-    if (ev.target && ev.target.closest && ev.target.closest(".sk-ask")) return false;
+    if (ev.target && ev.target.closest && ev.target.closest(".sk-ask, .sk-hud, .sk-side")) return false;     // typing in a box
     const mod = ev.metaKey || ev.ctrlKey;
     if (mod && ev.code === "KeyZ") { ev.preventDefault(); if (ev.shiftKey) this.redo(); else this.undo(); return true; }
     if (ev.key === "Escape") {
       if (this.ask) { this.closeAsk(); return true; }
-      if (this.pending.length) { this.pending = []; this.render(); return true; }
-      if (this.sel.length) { this.sel = []; this.render(); return true; }
+      if (this.pending.length) { this.pending = []; this.hideHud(); this.render(); return true; }
+      if (this.sel.length) { this.sel = []; this.render(); this.refreshSide(); return true; }
       if (this.tool !== "select") { this.setTool("select"); return true; }
       return false;                 // the app closes the sketch (asking nothing: nothing was written)
     }
     if (mod || ev.altKey) return false;
-    if (ev.key === "Enter" && this.pending.length) { ev.preventDefault(); this.pending = []; this.render(); return true; }
+    if (this.hud && /^[\d.\-]$/.test(ev.key)) { ev.preventDefault(); this.focusHud(ev.key); return true; }   // typing a size while drawing
+    if (ev.key === "Enter" && this.pending.length) { ev.preventDefault(); this.pending = []; this.hideHud(); this.render(); return true; }
     if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); this.deleteSelection(); return true; }
     if (ev.key === "x" || ev.key === "X") { this.toggleConstruction(); return true; }
     const k = (ev.shiftKey ? "Shift+" : "") + ev.key.toUpperCase();
@@ -618,7 +784,7 @@ export class Sketcher {
 
   setTool(id) {
     if (this.tool === "project" && id !== "project") this.vp.setHover(null);
-    this.tool = id; this.pending = [];
+    this.tool = id; this.pending = []; this.hideHud();
     if (id !== "select" && id !== "dim") this.sel = [];
     this.labels.classList.toggle("drawing", id !== "select" && id !== "dim");    // labels don't catch drawing clicks
     this.renderPanel(); this.render();
@@ -643,6 +809,7 @@ export class Sketcher {
       <div class="sk-tools" role="toolbar" aria-label="Constrain">${RULES.map((r) =>
         `<button type="button" data-rule="${r.id}" title="${esc(r.label + ": " + r.help)}">${r.glyph} ${esc(r.label)} ${kb(r.key)}</button>`).join("")}</div>
       <div class="sk-status"></div>
+      <div class="sk-side"></div>
       <div class="dlg-foot"><span class="sk-keys">${kb("⌘/Ctrl Z")} undo · ${kb("Del")} delete · ${kb("Esc")} step back</span>
         <button type="button" id="sk-cancel">Cancel</button><button type="button" class="primary" id="sk-ok">Finish sketch</button></div>`;
     this.panel.querySelectorAll("[data-draw]").forEach((b) => b.addEventListener("click", () => {
@@ -653,6 +820,197 @@ export class Sketcher {
     this.panel.querySelector("#sk-ok").addEventListener("click", () => this.ok());
     this.panel.querySelector("#sk-cancel").addEventListener("click", () => this.app.closeDialog());
     if (this.status) this.setStatus(...this.status);
+    this.refreshSide();
+  }
+
+  // ------------------------------------------------------------------ the side panel: what's selected, and everything in the sketch
+  // Inspector: the selected item's values, editable (Tab moves, Enter sets). A length, diameter
+  // or radius typed here becomes a dimension (it stays put; 🔓 removes it). Contents: every
+  // curve, point and constraint, as a list (hover highlights, click selects, × deletes), and
+  // the whole sketch as text.
+  refreshSide() {
+    const box = this.panel.querySelector(".sk-side");
+    if (!box || !this.frame) { if (box) box.innerHTML = ""; return; }
+    box.innerHTML = this.inspectorHtml() + this.contentsHtml();
+    this.bindSide(box);
+  }
+
+  dimIndex(kinds, args) {
+    return this.model.cons.findIndex((c) => c && kinds.includes(c[0]) && c.length === args.length + 2 && args.every((a, i) => c[i + 1] === a));
+  }
+
+  field(label, key, value, opts = {}) {
+    const locked = opts.lock !== undefined && opts.lock >= 0;
+    return `<label class="sk-f"><span>${esc(label)}</span><input data-f="${esc(key)}" value="${esc(value)}" spellcheck="false" autocomplete="off"${opts.ro ? " readonly" : ""}>`
+      + (locked ? `<button type="button" class="sk-unlock" data-unlock="${opts.lock}" title="Locked by a dimension: click to remove it">🔒</button>` : opts.lock !== undefined ? `<span class="sk-free" title="Free: typing a value adds a dimension">·</span>` : "")
+      + `</label>`;
+  }
+
+  inspectorHtml() {
+    if (this.sel.length !== 1) {
+      return this.sel.length ? `<div class="sk-insp"><b>${this.sel.length} selected</b><span class="sk-hint">Use the constraint buttons above, D for a dimension, Delete to remove.</span></div>` : "";
+    }
+    const k = this.sel[0], n = k.slice(2), fx = (v) => (isExpr(v) ? v.expr : fmt(v));
+    const dimv = (i) => (i >= 0 ? fx(this.model.cons[i][this.model.cons[i].length - 1]) : null);
+    if (k.startsWith("p:")) {
+      const p = this.pos(n), movable = Array.isArray(this.model.points[n]);
+      const ix = this.dimIndex(["x"], [n]), iy = this.dimIndex(["y"], [n]);
+      return `<div class="sk-insp" data-item="${esc(k)}"><b>${esc(n)}</b><span class="sk-kind">point${movable ? "" : " (fixed)"}</span>`
+        + this.field("X", "x", dimv(ix) ?? fmt(p[0]), { ro: !movable, lock: movable ? ix : undefined })
+        + this.field("Y", "y", dimv(iy) ?? fmt(p[1]), { ro: !movable, lock: movable ? iy : undefined }) + `</div>`;
+    }
+    if (k.startsWith("k:")) {
+      const c = this.model.cons[Number(n)];
+      if (!c) return "";
+      const isDim = c.length > 1 && (typeof c[c.length - 1] === "number" || isExpr(c[c.length - 1]));
+      return `<div class="sk-insp" data-item="${esc(k)}"><b>${esc(c[0])}</b><span class="sk-kind">${esc(c.slice(1, isDim ? -1 : undefined).join(", "))}</span>`
+        + (isDim ? this.field("Value", "con", fx(c[c.length - 1])) : "") + `</div>`;
+    }
+    const c = this.model.curves[n];
+    if (!c) return "";
+    const info = (this.solved && this.solved.curves[n]) || {};
+    const kind = c[0], constr = c.includes("construction");
+    let html = `<div class="sk-insp" data-item="${esc(k)}"><b>${esc(n)}</b><span class="sk-kind">${esc(kind)}${constr ? " · construction" : ""}</span>`;
+    if (kind === "line") {
+      const [a, b] = this.curveGeom(n) || [[0, 0], [0, 0]];
+      const i = this.dimIndex(["length"], [n]);
+      html += this.field("Length", "length", dimv(i) ?? fmt(Math.hypot(b[0] - a[0], b[1] - a[1])), { lock: i })
+        + this.field("Angle °", "angle", fmt(((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI) + 360) % 360), { ro: true });
+    } else if (kind === "circle") {
+      const i = this.dimIndex(["diameter", "radius"], [n]);
+      const cur = i >= 0 ? (this.model.cons[i][0] === "radius" && typeof this.model.cons[i][2] === "number" ? fmt(2 * this.model.cons[i][2]) : dimv(i)) : fmt(2 * (info.radius || c[2]));
+      html += this.field("Diameter", "diameter", cur, { lock: i });
+    } else if (kind === "arc") {
+      const i = this.dimIndex(["radius", "diameter"], [n]);
+      const g = this.curveGeom(n);
+      const r = info.centre ? Math.hypot(g[0][0] - info.centre[0], g[0][1] - info.centre[1]) : Math.hypot(this.pos(c[2])[0] - this.pos(c[1])[0], this.pos(c[2])[1] - this.pos(c[1])[1]);
+      html += this.field("Radius", "radius", i >= 0 && this.model.cons[i][0] === "radius" ? dimv(i) : fmt(r), { lock: i });
+    } else if (kind === "ellipse") {
+      html += this.field("Half-width X", "rx", fx(c[2])) + this.field("Half-width Y", "ry", fx(c[3])) + this.field("Angle °", "eangle", fx(typeof c[4] === "number" || isExpr(c[4]) ? c[4] : 0));
+    } else if (kind === "parametric") {
+      html += this.field("x(t) =", "px", c[1]) + this.field("y(t) =", "py", c[2]) + this.field("t from", "t0", fx(c[3])) + this.field("t to", "t1", fx(c[4]));
+    }
+    html += `<label class="sk-f sk-check"><input type="checkbox" data-constr ${constr ? "checked" : ""}> Construction (a guide, bounds no region)</label></div>`;
+    return html;
+  }
+
+  contentsHtml() {
+    const tabs = [["curves", "Curves"], ["points", "Points"], ["cons", "Constraints"], ["text", "Text"]];
+    let html = `<div class="sk-contents"><div class="sk-tabs" role="tablist">${tabs.map(([id, l]) => `<button type="button" role="tab" data-tab="${id}" aria-selected="${this.tab === id}">${l}</button>`).join("")}</div>`;
+    const fx = (v) => (isExpr(v) ? v.expr : typeof v === "number" ? fmt(v) : String(v));
+    const row = (key, name, detail, extra = "") => `<li data-key="${esc(key)}" class="${this.sel.includes(key) ? "sel" : ""}"><span class="nm">${esc(name)}</span><span class="dt">${esc(detail)}</span>${extra}<button type="button" class="x" data-del="${esc(key)}" title="Delete" aria-label="Delete ${esc(name)}">×</button></li>`;
+    if (this.tab === "curves") {
+      const items = Object.entries(this.model.curves).map(([n, c]) => row("c:" + n, n, `${c[0]} ${c.slice(1).filter((v) => v !== "construction").map(fx).join(", ")}${c.includes("construction") ? " · construction" : ""}`));
+      html += `<ul class="sk-list">${items.join("") || `<li class="empty">No curves yet: pick a drawing tool above.</li>`}</ul>`;
+    } else if (this.tab === "points") {
+      const items = Object.keys(this.allPoints()).map((n) => {
+        const p = this.pos(n), fixed = this.solved && this.solved.fixed.includes(n);
+        return row("p:" + n, n, `(${fmt(p[0])}, ${fmt(p[1])})${fixed ? " · fixed" : ""}`);
+      });
+      html += `<ul class="sk-list">${items.join("") || `<li class="empty">No points yet.</li>`}</ul>`;
+    } else if (this.tab === "cons") {
+      const items = this.model.cons.map((c, i) => {
+        if (!c) return "";
+        const isDim = c.length > 1 && (typeof c[c.length - 1] === "number" || isExpr(c[c.length - 1]));
+        const extra = isDim ? `<input class="sk-cv" data-con="${i}" value="${esc(fx(c[c.length - 1]))}" aria-label="${esc(c[0])} value" spellcheck="false">` : "";
+        return row("k:" + i, c[0], c.slice(1, isDim ? -1 : undefined).map(fx).join(", "), extra);
+      });
+      html += `<ul class="sk-list">${items.join("") || `<li class="empty">No constraints yet.</li>`}</ul>`;
+    } else {
+      const a = this.args();
+      html += `<textarea class="sk-text" spellcheck="false" aria-label="The sketch as text">points=${esc(a.points)},\ncurves=${esc(a.curves)},\nconstraints=${esc(a.constraints || "[]")}</textarea>`
+        + `<div class="sk-text-foot"><span class="sk-hint">Edit any line, then Apply (⌘/Ctrl Enter).</span><button type="button" data-apply-text>Apply</button></div>`;
+    }
+    return html + `</div>`;
+  }
+
+  bindSide(box) {
+    box.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => { this.tab = b.dataset.tab; this.refreshSide(); }));
+    box.querySelectorAll(".sk-list li[data-key]").forEach((li) => {
+      const key = li.dataset.key;
+      li.addEventListener("mouseenter", () => { this.hoverKey = key; this.render(); });
+      li.addEventListener("mouseleave", () => { if (this.hoverKey === key) { this.hoverKey = null; this.render(); } });
+      li.addEventListener("click", (e) => {
+        if (e.target.closest("input, button")) return;
+        if (this.tool !== "select" && this.tool !== "dim") this.setTool("select");
+        this.sel = e.shiftKey ? (this.sel.includes(key) ? this.sel.filter((x) => x !== key) : [...this.sel, key]) : [key];
+        this.render(); this.refreshSide();
+      });
+    });
+    box.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => { this.sel = [b.dataset.del]; this.deleteSelection(); }));
+    box.querySelectorAll("[data-unlock]").forEach((b) => b.addEventListener("click", () => {
+      this.remember(); this.model.cons[Number(b.dataset.unlock)] = null; this.model.cons = this.model.cons.filter(Boolean); this.solve();
+    }));
+    const constr = box.querySelector("[data-constr]");
+    if (constr) constr.addEventListener("change", () => this.toggleConstruction());
+    // Enter (or leaving the box) sets a value; Tab just moves on
+    const commit = (inp, fn) => {
+      inp.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); fn(inp.value); } });
+      inp.addEventListener("change", () => fn(inp.value));
+    };
+    box.querySelectorAll(".sk-insp input[data-f]").forEach((inp) => { if (!inp.readOnly) commit(inp, (v) => this.setValue(inp.dataset.f, v)); });
+    box.querySelectorAll("input[data-con]").forEach((inp) => commit(inp, (v) => {
+      const i = Number(inp.dataset.con), x = num(v), c = this.model.cons[i];
+      if (!c || x === null) return;
+      this.remember(); c[c.length - 1] = x; this.solve().then((ok) => { if (!ok) this.undo(true); });
+    }));
+    const ta = box.querySelector(".sk-text");
+    if (ta) {
+      ta.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); this.applyText(ta.value); } });
+      box.querySelector("[data-apply-text]").addEventListener("click", () => this.applyText(ta.value));
+    }
+  }
+
+  // a value typed in the inspector
+  setValue(key, text) {
+    const k = this.sel[0];
+    if (!k) return;
+    const n = k.slice(2), v = num(text);
+    const asDim = async (kinds, kind, args, value) => {
+      this.remember();
+      const i = this.dimIndex(kinds, args);
+      if (value === null) { if (i >= 0) this.model.cons.splice(i, 1); } else if (i >= 0) this.model.cons[i] = [kind, ...args, value]; else this.model.cons.push([kind, ...args, value]);
+      if (!(await this.solve())) this.undo(true);
+    };
+    if (k.startsWith("k:")) {
+      const c = this.model.cons[Number(n)];
+      if (c && v !== null) { this.remember(); c[c.length - 1] = v; this.solve().then((ok) => { if (!ok) this.undo(true); }); }
+      return;
+    }
+    if (k.startsWith("p:")) {
+      const ax = key === "x" ? 0 : 1, i = this.dimIndex([key], [n]);
+      if (i >= 0) return asDim([key], key, [n], v);                // held by a dimension: change it
+      if (typeof v !== "number") return asDim([key], key, [n], v);  // an expression: it has to be a dimension
+      this.remember(); this.model.points[n][ax] = v; this.solve();
+      return;
+    }
+    const c = this.model.curves[n];
+    if (key === "length") return asDim(["length"], "length", [n], v);
+    if (key === "diameter") return asDim(["diameter", "radius"], "diameter", [n], v);
+    if (key === "radius") return asDim(["radius", "diameter"], "radius", [n], v);
+    const slot = { rx: 2, ry: 3, eangle: 4, px: 1, py: 2, t0: 3, t1: 4 }[key];
+    if (slot === undefined || !c) return;
+    this.remember();
+    const value = key === "px" || key === "py" ? String(text) : v;
+    if (value === null) return;
+    if (key === "eangle" && (c.length < 5 || typeof c[4] === "string")) c.splice(4, 0, value); else c[slot] = value;
+    this.solve().then((ok) => { if (!ok) this.undo(true); });
+  }
+
+  // the Text tab: the whole sketch as points=..., curves=..., constraints=... (the server reads it)
+  async applyText(text) {
+    try {
+      const src = await post("/api/sketch_parse", { text });
+      this.remember();
+      this.model = { points: {}, curves: {}, cons: [] };
+      for (const [n, v] of Object.entries(src.points)) this.model.points[n] = Array.isArray(v) ? v.slice() : v;
+      for (const [n, v] of Object.entries(src.curves)) this.model.curves[n] = v.slice();
+      for (const v of src.constraints) if (!Array.isArray(v)) throw new Error("each constraint is written (kind, ...), e.g. (\"horizontal\", \"l1\")");
+      this.model.cons = src.constraints.map((c) => c.slice());
+      this.sel = [];
+      if (!(await this.solve())) { this.undo(true); return; }
+      toast("Sketch updated from the text");
+    } catch (e) { toast(e.message, true); }
   }
 
   // ------------------------------------------------------------------ drawing the sketch
@@ -700,7 +1058,7 @@ export class Sketcher {
       m.position.set(...this.w(this.pos(n))); m.userData.px = selSet.has(key) || this.hoverKey === key ? 4 : 2.6; m.renderOrder = 15; g.add(m);
     }
     // the rubber band for the tool in progress
-    const cur = this.cursor && this.cursor.p;
+    const cur = this.cursor && this.cursor.p && (this.pending.length ? this.hudTarget(this.cursor.p) : this.cursor.p);
     if (cur && this.pending.length) {
       const a = this.pending[0].p;
       if (this.tool === "line") addLine([a, cur], "--sel", true);
@@ -708,6 +1066,10 @@ export class Sketcher {
       if (this.tool === "circle" || (this.tool === "arc" && this.pending.length === 1)) {
         const r = Math.hypot(cur[0] - a[0], cur[1] - a[1]);
         addLine(Array.from({ length: 65 }, (_, i) => { const t = i / 64 * 2 * Math.PI; return [a[0] + r * Math.cos(t), a[1] + r * Math.sin(t)]; }), "--sel", true);
+      }
+      if (this.tool === "ellipse") {
+        const rx = Math.abs(cur[0] - a[0]), ry = Math.abs(cur[1] - a[1]);
+        addLine(Array.from({ length: 65 }, (_, i) => { const t = i / 64 * 2 * Math.PI; return [a[0] + rx * Math.cos(t), a[1] + ry * Math.sin(t)]; }), "--sel", true);
       }
       if (this.tool === "arc" && this.pending.length === 2) {
         const s = this.pending[1].p, r = Math.hypot(s[0] - a[0], s[1] - a[1]);
@@ -722,9 +1084,8 @@ export class Sketcher {
 
   // constraint glyphs and dimension values, as HTML over the view
   renderLabels() {
-    const keep = this.ask;
-    this.labels.innerHTML = "";
-    if (keep) this.labels.appendChild(keep);
+    // only the labels are redrawn: the boxes being typed in stay put (and keep the focus)
+    this.labels.querySelectorAll(".sk-label").forEach((el) => el.remove());
     this.labelItems = [];
     const mid = (n) => {
       const g = this.curveGeom(n);
@@ -763,7 +1124,7 @@ export class Sketcher {
         e.stopPropagation();
         const k = "k:" + i;
         this.sel = e.shiftKey ? (this.sel.includes(k) ? this.sel.filter((x) => x !== k) : [...this.sel, k]) : [k];
-        this.render();
+        this.render(); this.refreshSide();
       });
       this.labels.appendChild(el);
       this.labelItems.push({ el, at, off: isDim ? [12, -20] : [13 + 17 * (this.labelItems.filter((x) => x.at === at).length), 13] });   // beside, not on, the curve

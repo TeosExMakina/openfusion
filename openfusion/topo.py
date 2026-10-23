@@ -208,6 +208,12 @@ def edge_kind(edge) -> str:
     return {GeomAbs_Line: "line", GeomAbs_Circle: "circle"}.get(t, "curve")
 
 
+def edge_is_closed(edge) -> bool:
+    """A circle, ellipse or closed spline: the edge ends where it starts."""
+    a, b = edge_endpoints(edge)
+    return float(np.linalg.norm(a - b)) < 1e-7
+
+
 def edge_endpoints(edge):
     c = BRepAdaptor_Curve(edge)
     return to_np(c.Value(c.FirstParameter())), to_np(c.Value(c.LastParameter()))
