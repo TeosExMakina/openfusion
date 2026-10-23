@@ -348,6 +348,32 @@ def test_face_points_on_simple_faces():
     assert close(r.bodies["u"].anchor("center").origin, (20, 5, 5))
 
 
+def test_every_flat_face_has_its_corners_however_many_edges():
+    """A top face cut into an odd shape (notches, a slot, arcs: well over 12 edges) still offers
+    every corner, edge middle and arc centre, and a square opening offers its corners as inner(i)."""
+    src = ("a = box(length=60, width=40, height=10)\n"
+           + "".join(f"n{i} = cylinder(r=2, h=20, at=world.point({8 + 9 * i}, 0, -5))\n" for i in range(5))
+           + "sq = box(length=10, width=6, height=20, at=world.point(25, 20, -5))\n"
+           "c = cut(a, [n0, n1, n2, n3, n4, sq])\n")
+    r = ok(src + "s = sphere(r=0.5, at=a.face('+Z').corner(0).strict())\n"
+                 "t = sphere(r=0.5, at=a.face('+Z').inner(2).strict())\n"
+                 "u = sphere(r=0.5, at=a.face('+Z').arc(4).strict())\n")
+    from openfusion.refs import face_anchor_frame, face_points
+    b = r.bodies["a"]
+    face = b.faces_named("+Z")[0]
+    pts = face_points(b, face, face_anchor_frame(b, [face], "+Z"))
+    assert len(pts["corner"]) == 4 + 2 * 5 and len(pts["arc"]) == 5 and len(pts["mid"]) == 4 + 2 * 5
+    assert sorted(map(tuple, np.round(pts["inner"], 6))) == [(25, 20, 10), (25, 26, 10), (35, 20, 10), (35, 26, 10)]
+    assert close(r.bodies["t"].anchor("center").origin, pts["inner"][2])
+    assert any(close(r.bodies["s"].anchor("center").origin, p) for p in pts["corner"])
+    assert close(r.bodies["u"].anchor("center").origin, (44, 0, 10))
+    # the app gets them as snap points
+    from openfusion.export import body_scene
+    top = next(f for f in body_scene(b)["faces"] if f["label"] == "+Z")
+    kinds = [s["kind"] for s in top["snaps"]]
+    assert kinds.count("corner") == 14 and kinds.count("inner") == 4
+
+
 def test_fallback_is_flagged_and_strict_errors():
     src = ("a = box(length=20, width=10, height=5)\n"
            "c = cylinder(r=3, h=10, at=world.point(20, 5, -1))\ncut(a, tools=[c])\n")

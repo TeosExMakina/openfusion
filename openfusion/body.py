@@ -502,9 +502,18 @@ def unify_faces(shape, names, frame: Frame, owner: str):
     carrying names through. When two named faces merge, the one listed first
     (the target body's own faces come first) keeps its name."""
     from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
-    u = ShapeUpgrade_UnifySameDomain(shape, True, True, False)
-    u.Build()
-    new = u.Shape()
+    # the kernel's merge sometimes gives up on arcs meeting lines ("curves not joined"): then
+    # merge faces only, and if that fails too keep the faces as they are (still a valid solid)
+    for edges_too in (True, False):
+        try:
+            u = ShapeUpgrade_UnifySameDomain(shape, edges_too, True, False)
+            u.Build()
+            new = u.Shape()
+            break
+        except Exception:
+            continue
+    else:
+        return shape, tuple(names)
     sols = topo.solids(new)
     if len(sols) == 1:
         new = sols[0]

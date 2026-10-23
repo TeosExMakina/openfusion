@@ -255,7 +255,7 @@ class App {
       if (org && !opts.edit) opts.plane = { base: { ref: org.plane === "XY" ? null : org.ref, frame: org.frame } };
       else if (face && !opts.edit) {
         const snaps = this.vp.snapCandidates({ face: face.entry, body: face.body, label: face.label, point: face.point });
-        const c = snaps.find((x) => x.kind === "center") || snaps[0];
+        const c = this.vp.gridBase(snaps);
         opts.plane = { base: { ref: this.fixRef(c.ref, true), frame: c.frame } };
       }
       document.querySelectorAll("[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === id)));
@@ -298,8 +298,7 @@ class App {
       if (oneFace && !listField && faceSel.length) preset[oneFace.key] = faceText(faceSel[0]);
       if ((t.size || t.polyline) && face && face.entry && face.entry.kind === "plane") {
         const snaps = this.vp.snapCandidates({ face: face.entry, body: face.body, label: face.label, point: face.point }).map((c) => ({ ...c, ref: this.fixRef(c.ref, true) }));
-        const center = snaps.find((c) => c.kind === "center") || snaps[0];
-        opts.plane = { base: center, snaps, bed: false };
+        opts.plane = { base: this.vp.gridBase(snaps), snaps, bed: false };
       }
       if (id === "place" && face && face.entry) {
         const snaps = this.vp.snapCandidates({ face: face.entry, body: face.body, label: face.label, point: face.point });
@@ -400,7 +399,7 @@ class App {
       else this.selection = [s];
       this.vp.setSelected(this.selection.map((x) => x.key));
       this.vp.showLocalGrid(s && s.kind === "origin" ? s.frame
-        : s && s.kind === "face" && s.entry && s.entry.kind === "plane" ? this.vp.snapCandidates({ face: s.entry, body: s.body, label: s.label, point: s.point })[0].frame : null);
+        : s && s.kind === "face" && s.entry && s.entry.kind === "plane" ? this.vp.gridBase(this.vp.snapCandidates({ face: s.entry, body: s.body, label: s.label, point: s.point })).frame : null);
       this.renderSelection();
     });
     canvas.addEventListener("dblclick", (ev) => {

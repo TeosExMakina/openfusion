@@ -249,7 +249,7 @@ export class Sketcher {
       if (hit && hit.face && hit.face.kind !== "plane") { toast("Sketches go on flat faces", true); return; }
       if (hit) {
         const snaps = this.vp.snapCandidates({ face: hit.face, body: hit.body, label: hit.label, point: hit.point });
-        const c = snaps.find((s) => s.kind === "center") || snaps[0];
+        const c = this.vp.gridBase(snaps);
         this.beginOn({ ref: this.app.fixRef(c.ref, true), frame: c.frame });
       } else {
         this.beginOn({ ref: null, frame: { o: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] } });

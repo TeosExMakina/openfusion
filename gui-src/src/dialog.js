@@ -398,11 +398,28 @@ export class Dialog {
   }
 
   // A free point where the cursor meets the plane of `base`, kept as an offset from base's
-  // anchor and rounded to the visible grid.
-  freeCandidate(ev, base, bed = false) {
-    const fr = base.frame;
-    const p = this.vp.planePoint(ev, fr);
+  // anchor and rounded to the visible grid. feats: the face's points (corners, centre, holes...):
+  // the point is then measured from the one nearest the cursor, and the grid moves there, so
+  // a grid point by a corner is exactly on the corner's lines whatever the face's odd centre.
+  freeCandidate(ev, base, bed = false, feats = null) {
+    let fr = base.frame;
+    let p = this.vp.planePoint(ev, fr);
     if (!p) return null;
+    if (feats && feats.length) {
+      const w = at(fr, p.x, p.y);
+      const near = this.vp.nearestFeature(feats, w, fr);
+      if (near) {
+        base = near; fr = near.frame;
+        p = this.vp.planePoint(ev, fr);
+        if (!p) return null;
+        const lf = this.vp.localFrame;
+        if (lf && Math.abs((fr.o[0] - lf.o[0]) * fr.z[0] + (fr.o[1] - lf.o[1]) * fr.z[1] + (fr.o[2] - lf.o[2]) * fr.z[2]) < 1e-6
+            && (lf.o[0] !== fr.o[0] || lf.o[1] !== fr.o[1] || lf.o[2] !== fr.o[2])) {
+          this.vp.showLocalGrid(fr);                // same plane, another feature: the grid follows
+          this.vp.updateLocalGrid();
+        }
+      }
+    }
     const s = this.vp.snapStep();
     const x = Math.round(p.x / s) * s, y = Math.round(p.y / s) * s;
     const o = at(fr, x, y);
@@ -430,7 +447,7 @@ export class Dialog {
         const sameFace = this.cands && this.cands.faceRef === hit.ref;
         const snaps = this.vp.snapCandidates(hit);
         const center = snaps.find((c) => c.kind === "center") || snaps[0];
-        const free = hit.face && hit.face.kind === "plane" ? this.freeCandidate(ev, center) : null;
+        const free = hit.face && hit.face.kind === "plane" ? this.freeCandidate(ev, this.vp.gridBase(snaps), false, snaps) : null;
         const cands = free ? [free, ...snaps] : snaps;
         cands.faceRef = hit.ref;
         const near = this.vp.nearestSnap(ev, snaps);
@@ -465,7 +482,7 @@ export class Dialog {
   // second stage for primitives: any point on the chosen plane
   startHover(ev) {
     const pl = this.plane;
-    const free = this.freeCandidate(ev, pl.base, pl.bed);
+    const free = this.freeCandidate(ev, pl.base, pl.bed, pl.bed ? null : [pl.base, ...(pl.snaps || [])]);
     if (!free) return true;
     const near = this.vp.nearestSnap(ev, pl.snaps);
     this.cands = [free, ...pl.snaps];
@@ -506,15 +523,16 @@ export class Dialog {
     if (this.stage && this.active === "at" && this.cands) {
       const c = this.cands[this.candIdx];
       if (this.tool.polyline && this.stage === "plane") {         // a polyline draws on the plane it was started on
-        const center = this.cands.find((x) => x.kind === "center") || c;
         const snaps = this.cands.filter((x) => x.kind !== "free");
+        const center = this.vp.gridBase(snaps) || c;
         const base = c.kind === "free" || c.kind === "bed" ? (c.kind === "bed" ? { ref: "", frame: WORLD_FRAME } : center) : c;
         this.beginPoints(base, { base, snaps, bed: c.kind === "bed" }, false, c.kind === "free" ? [c.dx, c.dy] : c.kind === "bed" ? [c.p[0], c.p[1]] : [0, 0]);
         return true;
       }
       if (this.stage === "plane" && c.kind === "free") {          // a plane: now pick the start point on it
-        const center = this.cands.find((x) => x.kind === "center");
-        this.plane = { base: center, snaps: this.cands.filter((x) => x.kind !== "free"), bed: false };
+        const snaps = this.cands.filter((x) => x.kind !== "free");
+        const center = this.vp.gridBase(snaps);
+        this.plane = { base: center, snaps, bed: false };
         this.stage = "start"; this.tabbed = false;
         this.vp.showLocalGrid(center.frame);
         this.app.setHint(START_HINT);

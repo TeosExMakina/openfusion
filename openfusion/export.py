@@ -410,7 +410,7 @@ def body_scene(b) -> dict:
                 else:
                     entry["snaps"].append(_snap(f"{fref}.anchor()", "center", fr))
                 pts = face_points(b, f, fr)
-                for k in ("hole", "boss", "corner", "mid", "arc"):
+                for k in ("hole", "boss", "corner", "mid", "arc", "inner"):
                     for i, pt in enumerate(pts[k]):
                         s = _snap(f"{fref}.{k}({i})", k, fr, pt)
                         entry["snaps"].append(s)

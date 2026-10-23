@@ -731,6 +731,38 @@ export class Viewport {
     });
   }
 
+  // Where a face's grid starts (and free points are measured from): its centre when that is a
+  // design anchor (a box's side: symmetric, so its corners sit on the grid too), otherwise the
+  // corner of its outline at the low X, low Y end, so the grid lines up with the face's edges
+  // instead of with the middle of an odd shape.
+  gridBase(cands) {
+    const center = cands.find((c) => c.kind === "center") || cands[0];
+    if (!center || !center.frame) return center || null;
+    if (!/\.face\(/.test(center.ref)) return center;
+    const corners = cands.filter((c) => c.kind === "corner");
+    if (!corners.length) return center;
+    const fr = center.frame, o = new THREE.Vector3(...fr.o), x = new THREE.Vector3(...fr.x), y = new THREE.Vector3(...fr.y);
+    const loc = (p) => { const d = new THREE.Vector3(...p).sub(o); return [d.dot(x), d.dot(y)]; };
+    const key = (c) => { const [u, v] = loc(c.p); return [Math.round((u + v) * 1e4), Math.round(u * 1e4)]; };
+    const best = corners.reduce((a, c) => { const ka = key(a), kc = key(c); return kc[0] < ka[0] || (kc[0] === ka[0] && kc[1] < ka[1]) ? c : a; });
+    return { ...best, frame: { o: best.p, x: fr.x, y: fr.y, z: fr.z } };
+  }
+
+  // The face feature (corner, centre, hole, edge middle...) nearest a point on the face, as a
+  // frame with the face's own axes: free points are measured from it and the grid starts there,
+  // so grid points near a corner fall exactly on that corner's lines.
+  nearestFeature(cands, p, axes) {
+    let best = null, bd = Infinity;
+    for (const c of cands) {
+      if (!c || c.kind === "free" || c.kind === "bed" || !c.p) continue;
+      const d = Math.hypot(c.p[0] - p[0], c.p[1] - p[1], c.p[2] - p[2]);
+      if (d < bd - 1e-9) { bd = d; best = c; }
+    }
+    if (!best) return null;
+    const fr = axes || best.frame;
+    return { ...best, frame: { o: best.p, x: fr.x, y: fr.y, z: fr.z } };
+  }
+
   showSnaps(cands, active) {
     this.overlay.children.filter((o) => o.userData.snap).forEach((o) => this.overlay.remove(o));
     if (!cands) { this.drawAnchors(); return; }

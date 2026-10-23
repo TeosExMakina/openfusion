@@ -302,6 +302,10 @@ class FaceRef(Ref):
     def boss(self, i: int) -> "FacePointRef":
         return FacePointRef(self, "boss", i)
 
+    def inner(self, i: int) -> "FacePointRef":
+        """A corner of an opening in the face that isn't round (a square hole, a slot)."""
+        return FacePointRef(self, "inner", i)
+
     def edges(self, kind="all") -> "FaceEdgesRef":
         return FaceEdgesRef(self, kind)
 
@@ -367,17 +371,19 @@ class FaceAnchorRef(FrameRef):
 
 
 # ----------------------------------------------------------------- derived points
-MAX_SIMPLE_EDGES = 12
+MAX_SIMPLE_EDGES = 400        # beyond this (engraved text, imported meshes) a face offers no corners
 
 
 def face_points(body: Body, face, frame: Frame) -> dict:
-    """Named points on a face. Corners, midpoints and arc centers only on simple
-    faces (planar, <= 12 outer edges, lines and arcs). Centers of circular holes
-    and bosses (round features standing on the face) always."""
-    out = {"corner": [], "mid": [], "arc": [], "hole": [], "boss": [], "simple": False}
+    """Named points on a face. On every flat face: its outline's corners, the middles of its
+    edges and the centres of its arcs (whatever the outline is made of, notches and cut-outs
+    included), and the corners of its non-round openings ("inner"). On any face: the centres
+    of circular holes and bosses (round features standing on the face)."""
+    out = {"corner": [], "mid": [], "arc": [], "hole": [], "boss": [], "inner": [], "simple": False}
     planar = topo.surface_kind(face) == "plane"
     ow = topo.outer_wire(face)
     efmap = topo.edge_face_map(body.shape)
+    inner_loops = []
     # inner circular loops: a hole if the wall beyond it goes into the material
     # (below the face), a boss if it rises above the face
     for w in topo.wires(face):
@@ -385,6 +391,8 @@ def face_points(body: Body, face, frame: Frame) -> dict:
             continue
         es = topo.edges(w)
         if not es or not all(topo.edge_kind(e) == "circle" for e in es):
+            if es and planar:
+                inner_loops.append(w)
             continue
         cs = [topo.circle_center_radius(e) for e in es]
         if not all(np.linalg.norm(c[0] - cs[0][0]) < 1e-6 for c in cs):
@@ -397,8 +405,24 @@ def face_points(body: Body, face, frame: Frame) -> dict:
     for k in ("hole", "boss"):
         out[k].sort(key=lambda p: tuple(np.round(frame.to_local(p)[:2], 6)))
     oedges = topo.ordered_wire_edges(ow, face)
-    if not planar or len(oedges) > MAX_SIMPLE_EDGES or any(topo.edge_kind(e) not in ("line", "circle") for e in oedges):
+    if not planar or len(oedges) > MAX_SIMPLE_EDGES:
         return out
+    # corners of openings that aren't round (a square hole, a slot): loop by loop, in order of
+    # where the loops are, each loop from its corner nearest angle 0
+    loops = []
+    for w in inner_loops:
+        vs = topo.ordered_wire_vertices(w, face)
+        if len(vs) >= 2 and len(vs) <= MAX_SIMPLE_EDGES:
+            lc = frame.to_local(np.mean(vs, axis=0))
+
+            def turn(p, lc=lc):
+                d = frame.to_local(p) - lc
+                a = math.degrees(math.atan2(d[1], d[0])) % 360
+                return round(min(a, 360 - a), 6)
+            k = min(range(len(vs)), key=lambda i: (turn(vs[i]), i))
+            loops.append((tuple(np.round(lc[:2], 6)), vs[k:] + vs[:k]))
+    for _, vs in sorted(loops, key=lambda x: x[0]):
+        out["inner"] += vs
     verts = topo.ordered_wire_vertices(ow, face)
     n = len(verts)
     if n < 2:
@@ -451,7 +475,7 @@ class FacePointRef(FrameRef):
         pts = face_points(body, face, fr)
         lst = pts[self.kind]
         if self.kind in ("corner", "mid", "arc") and not pts["simple"]:
-            return _fallback(ctx, self.face_ref, who, "face is not simple (planar, <= 12 line/arc edges)", self.strict_)
+            return _fallback(ctx, self.face_ref, who, "corners, middles and arc centres are on flat faces only", self.strict_)
         if self.index >= len(lst):
             return _fallback(ctx, self.face_ref, who, f"face has only {len(lst)} {self.kind} point(s)", self.strict_)
         return Frame.make(lst[self.index], fr.x, fr.z)

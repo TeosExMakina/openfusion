@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openfusion"
-version = "0.9.1"
+version = "0.9.2"
 description = "Parametric, anchor-based solid modeling for 3D printing, on OpenCASCADE."
 readme = "README.md"
 requires-python = ">=3.11"

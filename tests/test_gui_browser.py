@@ -737,3 +737,40 @@ def test_import_tool_copies_the_file_and_builds_it(page, tmp_path):
     out = pg.evaluate("() => fetch('/api/upload', {method: 'POST', body: JSON.stringify({name: 'x.exe', data: ''})}).then(r => r.json())")
     assert "Import takes" in out["error"]
     assert not errors, errors
+
+
+def test_an_odd_shaped_face_offers_its_corners_and_lines_its_grid_up_with_one(page):
+    """A face cut into an odd outline (here: notched by holes, more than 12 edges) offers every
+    corner as a snap dot, and its grid (and the points clicked on it) start from a corner, not
+    from the middle of the odd shape."""
+    pg, f, errors = page
+    src = (START + "".join(f"n{i} = cylinder(r=2, h=20, at=world.point({6 + 7 * i}, 0, -5))\n" for i in range(4))
+           + "c = cut(plate, [n0, n1, n2, n3])\nt = extrude(plate.face(\"+Z\"), 5)\n")
+    pg.evaluate("(t) => window.ofApp.action('/api/script', {text: t})", src)
+    pg.wait_for_function("window.ofApp.vp.body('plate') && window.ofApp.vp.body('plate').faces.some(f => f.label === 't.end')")
+    top = pg.evaluate("() => window.ofApp.vp.body('plate').faces.find(f => f.label === 't.end').snaps.map(s => s.kind)")
+    assert top.count("corner") == 4 + 2 * 4, top
+    # select that face, open Box: the start plane's base is a corner, and the grid sits on it
+    pg.evaluate("""() => { const a = window.ofApp; const m = a.vp.faceMeshes.find(x => x.userData.body === 'plate' && x.userData.label === 't.end');
+        a.selection = [{kind: 'face', body: 'plate', ref: m.userData.ref, label: 't.end', entry: m.userData.face, point: [20, 15, 15], key: 'face:' + m.userData.ref}];
+        a.openTool('box'); }""")
+    pg.wait_for_function("window.ofApp.dialog && window.ofApp.dialog.plane")
+    base = pg.evaluate("() => window.ofApp.dialog.plane.base")
+    assert ".corner(" in base["ref"], base
+    assert base["frame"]["o"] == pytest.approx([0, 0, 15])       # the low-X, low-Y corner
+    assert pg.evaluate("() => window.ofApp.vp.localFrame.o") == pytest.approx([0, 0, 15])
+    # near the far corner, a click lands on it exactly: points are measured from the nearest
+    # feature, and the grid moves there
+    pg.evaluate("() => { window.ofApp.vp.frame('top'); }")
+    pg.wait_for_timeout(300)
+    pg.wait_for_function("!window.ofApp.vp.anim")
+    xy = pg.evaluate("""() => { const a = window.ofApp; const r = a.vp.canvas.getBoundingClientRect();
+        const s = a.vp.toScreen([0.4, 29.7, 15]); return [r.left + s[0], r.top + s[1]]; }""")
+    pg.mouse.move(*xy)
+    pg.mouse.move(xy[0] + 1, xy[1])
+    pg.wait_for_timeout(100)
+    c = pg.evaluate("() => { const d = window.ofApp.dialog; return d.cands[0]; }")
+    assert c["kind"] == "free" and re.search(r'\.corner\(\d+\)$', c["ref"]), c["ref"]
+    assert c["p"] == pytest.approx([0, 30, 15])
+    assert pg.evaluate("() => window.ofApp.vp.localFrame.o") == pytest.approx([0, 30, 15])
+    assert not errors, errors
